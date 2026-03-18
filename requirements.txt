@@ -20,7 +20,6 @@ narwhals==2.17.0
 networkx==3.4.2
 numpy==2.2.6
 osmnx==2.0.7
-packaging @ file:///home/task_176104877067765/conda-bld/packaging_1761049113113/work
 pandas==2.3.3
 pillow==12.1.1
 protobuf==6.33.5
