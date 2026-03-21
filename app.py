@@ -45,7 +45,7 @@ SHARP_TURN_MULT = 1.4
 HOTSPOT_MULT = 2.5
 
 
-@st.cache_resource
+@st.cache_data
 def load_and_prep_data():
     if not os.path.exists(GRAPH_PATH):
         G_raw = ox.graph_from_place("Singapore", network_type="drive")
