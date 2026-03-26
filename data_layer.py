@@ -147,21 +147,21 @@ class DriverDB:
     # Seed data — extend as needed
     _SEED = [
         # (name,          id,     cat, mileage_band,  crash, shift_start)
-        ("SGT Rahman",   "D001", "D", ">300k",       False, time(6,  0)),
-        ("CPL Lim",      "D002", "C", "100k-300k",   False, time(7,  0)),
-        ("PTE Krishnan", "D003", "B", "20k-100k",    False, time(8,  0)),
-        ("SGT Tan",      "D004", "C", "100k-300k",   True,  time(6, 30)),
-        ("CPL Wong",     "D005", "B", "20k-100k",    False, time(9,  0)),
-        ("LTA Ng",       "D006", "D", ">300k",       False, time(5, 30)),
-        ("PTE Ali",      "D007", "A", "<20k",        False, time(7, 30)),
-        ("CPL Chen",     "D008", "C", "100k-300k",   False, time(7,  0)),
-        ("SGT Yeo",      "D009", "B", "20k-100k",    True,  time(6,  0)),
-        ("CPL Muthu",    "D010", "C", ">300k",       False, time(7, 30)),
-        ("PTE Ismail",   "D011", "A", "<20k",        False, time(8, 30)),
-        ("LTA Chua",     "D012", "D", "100k-300k",   False, time(5,  0)),
-        ("SGT Hasan",    "D013", "C", "20k-100k",    False, time(8,  0)),
-        ("CPL Siva",     "D014", "B", "100k-300k",   False, time(7,  0)),
-        ("PTE Ong",      "D015", "A", "<20k",        True,  time(9,  0)),
+        ("Rahman",   "D001", "D", ">300k",       False, time(6,  0)),
+        ("Lim",      "D002", "C", "100k-300k",   False, time(7,  0)),
+        ("Krishnan", "D003", "B", "20k-100k",    False, time(8,  0)),
+        ("Tan",      "D004", "C", "100k-300k",   True,  time(6, 30)),
+        ("Wong",     "D005", "B", "20k-100k",    False, time(9,  0)),
+        ("Ng",       "D006", "D", ">300k",       False, time(5, 30)),
+        ("Ali",      "D007", "A", "<20k",        False, time(7, 30)),
+        ("Chen",     "D008", "C", "100k-300k",   False, time(7,  0)),
+        ("Yeo",      "D009", "B", "20k-100k",    True,  time(6,  0)),
+        ("Muthu",    "D010", "C", ">300k",       False, time(7, 30)),
+        ("Ismail",   "D011", "A", "<20k",        False, time(8, 30)),
+        ("Chua",     "D012", "D", "100k-300k",   False, time(5,  0)),
+        ("Hasan",    "D013", "C", "20k-100k",    False, time(8,  0)),
+        ("Siva",     "D014", "B", "100k-300k",   False, time(7,  0)),
+        ("Ong",      "D015", "A", "<20k",        True,  time(9,  0)),
     ]
 
     def __init__(self):
@@ -315,10 +315,14 @@ class TripLogDB:
         od_pairs = [(o, d) for o in locations for d in locations if o != d]
 
         for driver in drivers:
-            # Scale trip budget generously so hit-rate is meaningful:
-            # "<20k" → 30 trips, ">300k" → 600 trips
-            n_trips = {"<20k":24, "20k-100k": 100,
-                       "100k-300k": 300, ">300k": 600}[driver.mileage_band]
+            # Base trip budget per mileage band (1-in-50 sample of real career trips)
+            base_trips = {"<20k": 24, "20k-100k": 100,
+                          "100k-300k": 300, ">300k": 600}[driver.mileage_band]
+            # Per-driver jitter ±20% so same-band drivers have distinct histories.
+            # Seeded from driver_id so results are stable across reruns.
+            driver_rng = random.Random(int(driver.driver_id[1:]) + seed)
+            jitter     = driver_rng.randint(-base_trips // 5, base_trips // 5)
+            n_trips    = max(5, base_trips + jitter)
             eligible_vehicles = [v for v in vehicles
                                  if v.vehicle_type in VEHICLE_ELIGIBILITY.get(driver.category, [])]
             if not eligible_vehicles:
@@ -403,8 +407,25 @@ class TripLogDB:
             return "Medium"
         return "Low"
 
+    def vehicle_type_trips(self, driver_id: str, vehicle_type: str,
+                           vehicle_db: VehicleDB) -> int:
+        """
+        Return the number of trips driver has made with a specific vehicle type.
+        More efficient than vehicle_type_experience() when only one type is needed:
+        avoids building the full dict and resolves each plate only once per log.
+        """
+        count = 0
+        for log in self._logs:
+            if log.driver_id != driver_id:
+                continue
+            v = vehicle_db.get(log.vehicle_number)
+            if v and v.vehicle_type == vehicle_type:
+                count += 1
+        return count
+
     def vehicle_type_experience(self, driver_id: str, vehicle_db: VehicleDB) -> dict:
-        """Return trip counts broken down by vehicle TYPE (not plate)."""
+        """Return trip counts broken down by vehicle TYPE (not plate).
+        Kept for completeness; use vehicle_type_trips() when querying a single type."""
         type_counts: dict[str, int] = {}
         for log in self._logs:
             if log.driver_id != driver_id:
@@ -619,7 +640,11 @@ class RouteFeatureExtractor:
         dist_km    = total_len / 1000.0
         breakdown  = {k: round(v / max(total_len, 1), 3)
                       for k, v in road_class_lengths.items()}
-        traffic    = self._sim.query_traffic(node_sequence, departure_time, weather)
+        # Pass DG so query_traffic can apply road-class modifiers per edge
+        # (motorway vs residential capacity differences). Previously DG=None
+        # caused the road-class adjustment to be skipped (fallback road_mult=1.0).
+        traffic    = self._sim.query_traffic(node_sequence, departure_time, weather,
+                                             DG=self._DG)
 
         return RouteFeatures(
             route_index          = route_index,
@@ -708,17 +733,19 @@ def build_task_context(
     driver_contexts  = []
 
     for driver in eligible_drivers:
-        fatigue  = DriverDB.compute_fatigue(driver, departure_time)
-        route_exp = trip_log_db.route_experience(driver.driver_id, origin, destination)
-        vtype_exp = trip_log_db.vehicle_type_experience(driver.driver_id, vehicle_db)
-        has_driven_type = vehicle.vehicle_type in vtype_exp and vtype_exp[vehicle.vehicle_type] > 0
+        fatigue        = DriverDB.compute_fatigue(driver, departure_time)
+        route_exp      = trip_log_db.route_experience(driver.driver_id, origin, destination)
+        veh_type_trips = trip_log_db.vehicle_type_trips(
+                             driver.driver_id, vehicle.vehicle_type, vehicle_db)
+        total_trips    = sum(trip_log_db.vehicle_type_experience(
+                             driver.driver_id, vehicle_db).values())
 
         driver_contexts.append({
-            "profile":            driver,
-            "fatigue_hours":      round(fatigue, 2),
-            "route_experience":   route_exp,
-            "vehicle_type_exp":   vtype_exp,
-            "has_driven_type":    has_driven_type,
+            "profile":          driver,
+            "fatigue_hours":    round(fatigue, 2),
+            "route_experience": route_exp,
+            "veh_type_trips":   veh_type_trips,   # trips with the assigned vehicle type
+            "total_trips":      total_trips,       # total trips across all vehicle types (for display)
         })
 
     return {
@@ -778,4 +805,3 @@ if __name__ == "__main__":
     print(f"  Visibility label: {EnvironmentSim.visibility_label(snap, time(14,30))}")
 
     print("\nAll smoke tests passed ✓")
-

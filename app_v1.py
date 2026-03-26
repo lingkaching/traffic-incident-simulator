@@ -28,7 +28,7 @@ from data_layer import (
     VEHICLE_ELIGIBILITY, ROAD_CLASS_LABELS,
 )
 
-st.set_page_config(layout="wide", page_title="Fleet Risk Command", page_icon="🛡️")
+st.set_page_config(layout="wide", page_title="Traffic Risk Assessment", page_icon="🛡️")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CSS  — clean light gov theme (unchanged from v11)
@@ -111,6 +111,29 @@ html, body, [class*="css"] {
 [data-testid="stDataFrame"] { border:1px solid #e2e5ea !important; border-radius:6px !important; }
 .stSlider > div { padding:0 !important; }
 .empty-state { text-align:center; padding:70px 20px; color:#9ca3af; }
+
+/* ── Collapsible factor sections ── */
+div[data-testid="stExpander"] {
+    border: 1px solid #e2e5ea !important;
+    border-radius: 6px !important;
+    background: #ffffff !important;
+    margin-bottom: 6px !important;
+}
+div[data-testid="stExpander"] summary {
+    font-family: 'DM Sans', sans-serif !important;
+    font-size: 12px !important;
+    font-weight: 600 !important;
+    color: #374151 !important;
+    padding: 8px 12px !important;
+}
+div[data-testid="stExpander"] summary:hover {
+    background: #f9fafb !important;
+    border-radius: 6px !important;
+}
+div[data-testid="stExpander"] > div[data-testid="stExpanderDetails"] {
+    padding: 2px 12px 8px !important;
+    border-top: 1px solid #f3f4f6 !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -127,17 +150,23 @@ ROAD_MULT    = {"motorway": 0.7, "trunk": 0.9, "primary": 1.2,
 
 FATIGUE_RATE       = 0.08
 CRASH_MULT         = 1.5
-ROUTE_EXP_THRESHOLD = 10   # total trips — High familiarity
-ROUTE_EXP_BONUS    = 0.85  # multiplier if High familiarity
-ROUTE_EXP_MED_MULT = 0.95  # Medium familiarity
-ROUTE_EXP_LOW_MULT = 1.20  # Low familiarity
-VEH_EXP_PENALTY    = 1.15  # never driven this type before
-PURPOSE_EXP_THRESHOLD = 20 # task_exp trips for general purpose experience
-PURPOSE_EXP_BONUS  = 0.9
-PURPOSE_EXP_PENALTY= 1.2
-MAINT_POOR_MULT    = 1.3
+ROUTE_EXP_THRESHOLD = 10   # trips on this specific route → High familiarity
+ROUTE_EXP_BONUS    = 0.80  # High route familiarity
+ROUTE_EXP_MED_MULT = 1.00  # Medium route familiarity
+ROUTE_EXP_LOW_MULT = 1.35  # Low route familiarity
+# Vehicle-type experience: graduated by trips with the assigned vehicle type.
+# Mirrors the route familiarity structure — three tiers based on trip count.
+VEH_TYPE_EXP_HIGH_THRESH = 100   # ≥50 trips with this type → High (experienced)
+VEH_TYPE_EXP_MED_THRESH  = 50   # ≥10 trips               → Medium
+                                 # <10 trips               → Low  (novice on this type)
+VEH_TYPE_EXP_HIGH_MULT   = 0.85 # experienced: reduced risk
+VEH_TYPE_EXP_MED_MULT    = 1.00 # neutral
+VEH_TYPE_EXP_LOW_MULT    = 1.30 # novice on this vehicle type: elevated risk
+MAINT_POOR_MULT    = 1.5   # Poor condition multiplier       (was 1.3 — understated unsafe vehicles)
 TECH_PENALTY       = 0.05
-NIGHT_VIS_MULT     = 1.4
+# NOTE: no separate NIGHT_VIS_MULT — night is already captured by effective_visibility_km()
+# which caps visibility at _NIGHT_VIS_CAP_KM (4 km) at night, directly raising vis_m.
+# Adding a second night multiplier on top would double-count the effect.
 NARROW_ROAD_MULT   = 1.3
 SHARP_TURN_MULT    = 1.4
 HOTSPOT_MULT_VAL   = 2.5
@@ -148,8 +177,11 @@ HOTSPOT_MULT_VAL   = 2.5
 # ══════════════════════════════════════════════════════════════════════════════
 
 def risk_category(prob: float) -> str:
-    if prob < 0.0002:  return "Low"
-    if prob < 0.0005:  return "Medium"
+    # Low  : prob < 0.03%  (routine assignments under normal conditions)
+    # Medium: 0.03% – 0.10% (elevated but manageable — wider band than before)
+    # High : prob ≥ 0.10%  (genuinely dangerous; reserve for worst-case combos)
+    if prob < 0.05:  return "Low"
+    if prob < 0.10:  return "Medium"
     return "High"
 
 def risk_pill_html(level: str) -> str:
@@ -162,112 +194,184 @@ def frow(label: str, value: str, cls: str = "") -> str:
             f'<span class="factor-value {cls}">{value}</span>'
             f'</div>')
 
+# ══════════════════════════════════════════════════════════════════════════════
+# INDEX FUNCTIONS
+# P, T, A depend only on their own domain inputs — no segment data needed.
+# E and R are length-weighted averages over route segments; they are computed
+# inside compute_route_risk() in a single pass so we never iterate edges twice.
+# ══════════════════════════════════════════════════════════════════════════════
+
 # ── Index P : Driver ──────────────────────────────────────────────────────────
 def compute_P(driver_ctx: dict) -> float:
-    """P = mileage × crash × fatigue (from shift_start → departure_time)."""
+    """
+    P = mileage × crash × fatigue
+
+    Fatigue uses a piecewise non-linear curve:
+      0–4 h  : 0.05/hr  (normal working hours)
+      4–10 h : 0.10/hr  (fatigue accumulating)
+      >10 h  : 0.18/hr  (real impairment zone)
+    """
     profile = driver_ctx["profile"]
     fatigue = driver_ctx["fatigue_hours"]
+
+    if fatigue <= 4:
+        fatigue_mult = 1 + fatigue * 0.05
+    elif fatigue <= 10:
+        fatigue_mult = 1 + 4 * 0.05 + (fatigue - 4) * 0.10
+    else:
+        fatigue_mult = 1 + 4 * 0.05 + 6 * 0.10 + (fatigue - 10) * 0.18
+
     return (MILEAGE_MULT[profile.mileage_band]
             * (CRASH_MULT if profile.crash_history else 1.0)
-            * (1 + fatigue * FATIGUE_RATE))
+            * fatigue_mult)
+
 
 # ── Index T : Task ────────────────────────────────────────────────────────────
 def compute_T(driver_ctx: dict, purpose: str, route_idx: int) -> float:
     """
-    T = purpose × route_familiarity(route_idx) × general_exp × vehicle_exp
+    T = purpose × route_familiarity × veh_type_exp
 
-    route_familiarity is per-route-index: how many times the driver has
-    specifically taken route 0, 1, or 2 between this O-D pair.
-    This is what differentiates T across the 3 candidate routes for the same driver.
+    route_familiarity: how many times the driver has taken this specific
+    route index between the O-D pair (High / Medium / Low).
+
+    veh_type_exp: trips with the assigned vehicle type — graduated into
+    three tiers (High / Medium / Low), same structure as route familiarity.
+    Replaces the old binary veh_mult (yes/no) and the weak total-trips
+    exp_mult, which was too coarse to be meaningful.
     """
-    route_exp  = driver_ctx["route_experience"]
-    has_driven = driver_ctx["has_driven_type"]
+    route_exp      = driver_ctx["route_experience"]
+    veh_type_trips = driver_ctx["veh_type_trips"]
 
-    # General task experience: total trips ever as proxy for overall driving maturity
-    total_trips = sum(driver_ctx["vehicle_type_exp"].values())
-    exp_mult    = PURPOSE_EXP_BONUS if total_trips > PURPOSE_EXP_THRESHOLD else PURPOSE_EXP_PENALTY
+    route_fam = TripLogDB.per_route_familiarity(route_exp, route_idx)
+    fam_mult  = {"High": ROUTE_EXP_BONUS,
+                 "Medium": ROUTE_EXP_MED_MULT,
+                 "Low":    ROUTE_EXP_LOW_MULT}[route_fam]
 
-    # Per-route familiarity — uses route_idx to pick the right bucket
-    route_fam  = TripLogDB.per_route_familiarity(route_exp, route_idx)
-    fam_mult   = {"High": ROUTE_EXP_BONUS,
-                  "Medium": ROUTE_EXP_MED_MULT,
-                  "Low":    ROUTE_EXP_LOW_MULT}[route_fam]
+    if veh_type_trips >= VEH_TYPE_EXP_HIGH_THRESH:
+        veh_type_exp_mult = VEH_TYPE_EXP_HIGH_MULT
+        veh_type_level    = "High"
+    elif veh_type_trips >= VEH_TYPE_EXP_MED_THRESH:
+        veh_type_exp_mult = VEH_TYPE_EXP_MED_MULT
+        veh_type_level    = "Medium"
+    else:
+        veh_type_exp_mult = VEH_TYPE_EXP_LOW_MULT
+        veh_type_level    = "Low"
 
-    # Vehicle type experience
-    veh_mult = 1.0 if has_driven else VEH_EXP_PENALTY
+    return PURPOSE_MULT[purpose] * fam_mult * veh_type_exp_mult
 
-    return PURPOSE_MULT[purpose] * exp_mult * fam_mult * veh_mult
 
 # ── Index A : Vehicle ─────────────────────────────────────────────────────────
 def compute_A(vehicle_ctx: dict, weather: "WeatherSnapshot") -> float:
     """
-    A = vehicle_type × condition × safety_tech_discount × braking_degradation
-    braking_degradation comes from weather (wet/flooded roads).
+    A = vehicle_type × condition × (1 − safety_tech_discount) × braking_mult
+
+    condition: Good → 1.0 / Fair → 1.1 / Poor → MAINT_POOR_MULT
+    braking_mult: weather-driven wet-road stopping-distance penalty.
     """
     profile   = vehicle_ctx["profile"]
     condition = vehicle_ctx["condition"]
     tech_disc = len(profile.safe_tech) * TECH_PENALTY
+    cond_mult = (MAINT_POOR_MULT if condition == "Poor" else
+                 1.1             if condition == "Fair" else 1.0)
     return (VTYPE_MULT.get(profile.vehicle_type, 1.0)
-            * (MAINT_POOR_MULT if condition == "Poor" else (1.1 if condition == "Fair" else 1.0))
+            * cond_mult
             * (1 - tech_disc)
             * weather.braking_mult)
 
-# ── Index E : Environment ─────────────────────────────────────────────────────
-def compute_E(env_ctx: dict, route_features, dep_time: "time") -> float:
+
+# ── Per-edge roadway multiplier (helper used inside compute_route_risk) ────────
+def _roadway_mult_for_edge(edge: dict) -> float:
     """
-    E = visibility_mult × avg_traffic_density_mult
+    R_i = hotspot × road_class × narrow × sharp, capped at 4.0.
+    Cap prevents a single residential-hotspot-narrow-sharp edge (~10×)
+    from dominating the entire route lambda.
+    """
+    hw = edge.get("highway", "residential")
+    if isinstance(hw, list):
+        hw = hw[0] if hw else "residential"
+    mult = edge.get("hotspot_mult", 1.0)
+    mult *= ROAD_MULT.get(hw, 1.5)
+    if edge.get("is_narrow"): mult *= NARROW_ROAD_MULT
+    if edge.get("is_sharp"):  mult *= SHARP_TURN_MULT
+    return min(mult, 4.0)
 
-    visibility_mult   = f(weather condition, day/night) via EnvironmentSim.visibility_mult
-    avg_traffic       = per-segment densities already include weather degradation
-                        (baked in by EnvironmentSim.query_traffic at data-layer time)
 
-    Note: weather braking effect is captured in A, not here.
+# ── Full route risk ────────────────────────────────────────────────────────────
+def compute_route_risk(route_features, P: float, T: float, A: float,
+                       env_ctx: dict, dep_time: "time", DG) -> dict:
+    """
+    Single-pass over route edges. Computes per-segment lambda and derives
+    the route-level E and R indices as length-weighted averages:
+
+        E_i = vis_m × traffic_m(i)
+        R_i = hotspot × road_class × narrow × sharp   [capped 4.0]
+
+        E = Σ_i  E_i × len(i) / total_len
+        R = Σ_i  R_i × len(i) / total_len
+
+        λ_i = BASE_LAMBDA × len(i) × P × T × A × E_i × R_i
+        prob = 1 − exp(−Σ λ_i)
+
+    vis_m is computed by EnvironmentSim.visibility_mult(), which calls
+    effective_visibility_km() — this already caps visibility at _NIGHT_VIS_CAP_KM
+    (4 km) at night, so the night penalty is fully captured inside vis_m.
+    No separate night multiplier is needed or applied.
     """
     weather_snap = env_ctx["weather"]
     vis_m        = EnvironmentSim.visibility_mult(weather_snap, dep_time)
+    # Night effect is already inside vis_m via the 4 km visibility cap.
 
-    segs         = route_features.segment_traffic
-    avg_density  = (sum(s.density for s in segs) / len(segs)) if segs else 3.0
-    traffic_m    = avg_density / 3.0
+    traffic_lookup: dict[tuple, float] = {
+        (s.u, s.v): s.density for s in route_features.segment_traffic
+    }
 
-    return vis_m * traffic_m
-
-# ── Per-segment roadway multiplier ────────────────────────────────────────────
-def roadway_mult_for_edge(edge: dict) -> float:
-    mult  = edge.get("hotspot_mult", 1.0)
-    mult *= ROAD_MULT.get(edge.get("highway", "residential"), 1.5)
-    if edge.get("is_narrow"): mult *= NARROW_ROAD_MULT
-    if edge.get("is_sharp"):  mult *= SHARP_TURN_MULT
-    return mult
-
-# ── Full route risk ────────────────────────────────────────────────────────────
-def compute_route_risk(route_features, P: float, T: float, A: float, E: float, DG) -> dict:
-    """
-    Walk every edge of the route, compute per-segment lambda, return risk dict.
-    """
-    nodes         = route_features.node_sequence
-    total_lambda  = 0.0
-    segment_data  = []          # (u, v, risk_per_meter)
-    hotspot_coords= []
+    nodes          = route_features.node_sequence
+    total_lambda   = 0.0
+    total_len      = 0.0
+    weighted_E     = 0.0   # Σ E_i × len(i)
+    weighted_R     = 0.0   # Σ R_i × len(i)
+    segment_data   = []
+    hotspot_coords = []
 
     for u, v in zip(nodes[:-1], nodes[1:]):
-        edge   = DG.get_edge_data(u, v) or {}
-        length = edge.get("length", 0.0)
-        R      = roadway_mult_for_edge(edge)
+        edge      = DG.get_edge_data(u, v) or {}
+        length    = edge.get("length", 0.0)
+
+        traffic_m = traffic_lookup.get((u, v), 3.0) / 3.0
+        E_i       = vis_m * traffic_m
+        R_i       = _roadway_mult_for_edge(edge)
+
+        weighted_E += E_i * length
+        weighted_R += R_i * length
+        total_len  += length
 
         if edge.get("hotspot_mult", 1.0) > 1.0:
             hotspot_coords.append((DG.nodes[u]["y"], DG.nodes[u]["x"]))
 
-        lam = BASE_LAMBDA * length * P * T * A * E * R
+        lam = BASE_LAMBDA * length * P * T * A * E_i * R_i
         total_lambda += lam
-        segment_data.append((u, v, lam / max(length, 1)))
+        segment_data.append((u, v, lam))          # store raw λ_i; fraction computed below
+
+    denom = max(total_len, 1e-9)
+    E = weighted_E / denom
+    R = weighted_R / denom
+
+    # Express each segment's lambda as a fraction of total_lambda.
+    # This directly connects map colour to the final prob = 1 − exp(−Σλ_i):
+    # red segments are the ones most responsible for the route's risk number.
+    total_lambda_safe = max(total_lambda, 1e-30)
+    segments_with_frac = [(u, v, lam_i / total_lambda_safe)
+                          for u, v, lam_i in segment_data]
 
     return {
         "prob":           1 - math.exp(-total_lambda),
+        "total_lambda":   total_lambda,
         "dist_km":        route_features.dist_km,
-        "segments":       segment_data,       # (u, v, risk_per_meter)
+        "segments":       segments_with_frac,      # (u, v, frac_i) where frac_i = λ_i/Σλ
         "hotspot_coords": hotspot_coords,
-        "P": P, "T": T, "A": A, "E": E,
+        "P": P, "T": T, "A": A, "E": E, "R": R,
+        "vis_m":         vis_m,
+        "avg_traffic_m": weighted_E / (vis_m * denom) if vis_m > 0 else 1.0,
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -383,8 +487,7 @@ def build_results(task_ctx: dict, DG) -> list[dict]:
         P = compute_P(driver_ctx)
         for rf in task_ctx["routes"]:
             T    = compute_T(driver_ctx, task_ctx["purpose"], rf.route_index)
-            E    = compute_E(env_ctx, rf, dep_time)
-            risk = compute_route_risk(rf, P, T, A, E, DG)
+            risk = compute_route_risk(rf, P, T, A, env_ctx, dep_time, DG)
             rows.append({
                 "driver_ctx":     driver_ctx,
                 "vehicle_ctx":    vehicle_ctx,
@@ -444,8 +547,7 @@ def compute_risk_for_result(result: dict, DG) -> dict:
     P = compute_P(driver_ctx)
     T = compute_T(driver_ctx, purpose, rf.route_index)
     A = compute_A(vehicle_ctx, weather)
-    E = compute_E(env_ctx, rf, dep_time)
-    return compute_route_risk(rf, P, T, A, E, DG)
+    return compute_route_risk(rf, P, T, A, env_ctx, dep_time, DG)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAP RENDERER
@@ -461,19 +563,30 @@ def render_map(G_raw, result: dict, risk: dict) -> folium.Map:
                 border:1px solid #d1d5db;border-radius:8px;padding:10px 14px;
                 font-size:11px;font-family:sans-serif;z-index:9999;
                 box-shadow:0 2px 6px rgba(0,0,0,.1);">
-        <b>Risk Level</b><br>
-        <span style="color:#16a34a;">●</span> Low &nbsp;
-        <span style="color:#d97706;">●</span> Medium &nbsp;
-        <span style="color:#dc2626;">●</span> High<br>
+        <b>Contribution of Route Risk</b><br>
+        <span style="color:#16a34a;">●</span> &lt;1% &nbsp;
+        <span style="color:#d97706;">●</span> 1–5% &nbsp;
+        <span style="color:#dc2626;">●</span> &gt;5%<br>
+        <span style="font-size:10px;color:#6b7280;">Hover for exact % of total risk</span><br>
         <span>⚠️</span> Collision Hotspot
     </div>"""
     m.get_root().html.add_child(folium.Element(legend_html))
+        
 
-    for u, v, rpm in risk["segments"]:
-        color = "#16a34a" if rpm < 2e-6 else "#d97706" if rpm < 5e-6 else "#dc2626"
+    # frac_i = λ_i / Σλ: the fraction of total route risk from this segment.
+    # Colour by direct percentage — no normalisation needed:
+    #   green  < 1%  : minor contributor
+    #   amber  1–5%  : notable contributor
+    #   red    > 5%  : this one segment accounts for >5% of the route's total
+    #                  incident probability — a genuine hotspot
+    # The tooltip shows the exact % so map and risk number are on the same scale.
+    for u, v, frac in risk["segments"]:
+        pct   = frac * 100
+        color = "#dc2626" if pct > 5.0 else "#d97706" if pct > 1.0 else "#16a34a"
         pts   = [[G_raw.nodes[u]["y"], G_raw.nodes[u]["x"]],
                  [G_raw.nodes[v]["y"], G_raw.nodes[v]["x"]]]
-        folium.PolyLine(pts, color=color, weight=5, opacity=0.85).add_to(m)
+        folium.PolyLine(pts, color=color, weight=5, opacity=0.85,
+                        tooltip=f"{pct:.2f}% of route risk").add_to(m)
 
     for lat, lon in set(risk.get("hotspot_coords", [])):
         folium.Marker(
@@ -648,23 +761,22 @@ with middle:
                             padding:11px 14px;margin-bottom:2px;
                             box-shadow:{'0 0 0 3px rgba(59,130,246,.08)' if selected else 'none'};">
                     <div style="display:flex;justify-content:space-between;align-items:center;">
-                        <span style="font-size:14px;font-weight:700;color:#111827;">
+                        <span style="font-size:16px;font-weight:700;color:#111827;">
                             {RANK_EMOJI[i]}&nbsp;{p.name}
                         </span>
-                        <span style="font-family:'DM Mono',monospace;font-size:10px;
+                        <span style="font-family:'DM Mono',monospace;font-size:12px;
                                      background:{'#dbeafe' if selected else '#f3f4f6'};
                                      color:{'#1d4ed8' if selected else '#6b7280'};
                                      padding:2px 8px;border-radius:20px;">
                             {lvl_icon} {lvl}
                         </span>
                     </div>
-                    <div style="font-family:'DM Mono',monospace;font-size:11px;
+                    <div style="font-family:'DM Mono',monospace;font-size:12px;
                                 color:#6b7280;margin-top:4px;line-height:1.7;">
                         {p.driver_id} · Cat {p.category}
                         &nbsp;·&nbsp; Route {rf.route_index + 1}
                         &nbsp;·&nbsp; {rf.dist_km:.2f} km
-                        &nbsp;·&nbsp; Fatigue {fat:.1f} h
-                        &nbsp;·&nbsp; {fam_icon} {fam} route familiarity
+                        &nbsp;·&nbsp; Since Shift: {fat:.1f} h
                     </div>
                 </div>""", unsafe_allow_html=True)
             with col_pick:
@@ -738,14 +850,21 @@ with right:
         live_level = risk_category(live_prob)
 
         # ── Driver profile box ───────────────────────────────────────────────
-        avatar      = DRIVER_AVATARS[int(profile.driver_id[1:]) % len(DRIVER_AVATARS)]
-        crash_txt   = "🔴 Yes" if profile.crash_history else "🟢 None"
-        fam         = TripLogDB.per_route_familiarity(driver_ctx["route_experience"], rf.route_index)
-        fam_trips   = driver_ctx["route_experience"]["by_route"].get(rf.route_index, 0)
-        od_trips    = driver_ctx["route_experience"]["total_trips"]
-        veh_exp     = driver_ctx["has_driven_type"]
-        total_trips = sum(driver_ctx["vehicle_type_exp"].values())
-        fat_h       = driver_ctx["fatigue_hours"]
+        avatar         = DRIVER_AVATARS[int(profile.driver_id[1:]) % len(DRIVER_AVATARS)]
+        crash_txt      = "🔴 Yes" if profile.crash_history else "🟢 None"
+        fam            = TripLogDB.per_route_familiarity(driver_ctx["route_experience"], rf.route_index)
+        fam_trips      = driver_ctx["route_experience"]["by_route"].get(rf.route_index, 0)
+        veh_type_trips = driver_ctx["veh_type_trips"]
+        total_trips    = driver_ctx["total_trips"]
+        fat_h          = driver_ctx["fatigue_hours"]
+
+        # Vehicle type experience level + multiplier
+        if veh_type_trips >= VEH_TYPE_EXP_HIGH_THRESH:
+            veh_type_level = "High";   veh_type_m = VEH_TYPE_EXP_HIGH_MULT
+        elif veh_type_trips >= VEH_TYPE_EXP_MED_THRESH:
+            veh_type_level = "Medium"; veh_type_m = VEH_TYPE_EXP_MED_MULT
+        else:
+            veh_type_level = "Low";    veh_type_m = VEH_TYPE_EXP_LOW_MULT
 
         st.markdown(f"""
         <div class="driver-profile-box">
@@ -768,8 +887,8 @@ with right:
                     <div class="metric-lbl">This Route</div>
                 </div>
                 <div class="metric-box">
-                    <div class="metric-val">{'✓' if veh_exp else '✗'}</div>
-                    <div class="metric-lbl">Veh. Exp.</div>
+                    <div class="metric-val">{veh_type_trips}</div>
+                    <div class="metric-lbl">This Vehicle Type</div>
                 </div>
             </div>
             <div style="font-size:11px;color:#6b7280;line-height:1.8;">
@@ -784,44 +903,47 @@ with right:
             <div style="margin-top:4px;text-align:right;">{risk_pill_html(live_level)}</div>
         </div>""", unsafe_allow_html=True)
 
-        # ── DRIVER FACTORS ───────────────────────────────────────────────────
-        st.markdown('<div class="section-label">Driver Factors (P)</div>', unsafe_allow_html=True)
+        # ── DRIVER FACTORS (P) ───────────────────────────────────────────────
         mil_m = MILEAGE_MULT[profile.mileage_band]
         mil_c = "good" if mil_m <= 0.95 else ("warn" if mil_m <= 1.1 else "danger")
-        fat_m = 1 + fat_h * FATIGUE_RATE
-        fat_c = "danger" if fat_h > 8 else ("warn" if fat_h > 4 else "good")
+        # Recompute fatigue_mult using piecewise curve for display
+        if fat_h <= 4:
+            fat_m = 1 + fat_h * 0.05
+        elif fat_h <= 10:
+            fat_m = 1 + 4 * 0.05 + (fat_h - 4) * 0.10
+        else:
+            fat_m = 1 + 4 * 0.05 + 6 * 0.10 + (fat_h - 10) * 0.18
+        fat_c = "danger" if fat_h > 10 else ("warn" if fat_h > 4 else "good")
         cr_c  = "danger" if profile.crash_history else "good"
         P_val = live_risk["P"]
-        st.markdown(
-            frow("Mileage Band",   f"{profile.mileage_band}  →  {mil_m:.2f}×", mil_c) +
-            frow("Fatigue",        f"{fat_h:.1f} h (shift {profile.shift_start_time.strftime('%H:%M')})  →  {fat_m:.2f}×", fat_c) +
-            frow("Crash History",  "Yes  →  1.50×" if profile.crash_history else "None  →  1.00×", cr_c) +
-            frow("Driver Index P", f"{P_val:.4f}"),
-            unsafe_allow_html=True,
-        )
 
-        # ── TASK FACTORS ─────────────────────────────────────────────────────
-        st.markdown('<div class="section-label">Task Factors (T)</div>', unsafe_allow_html=True)
-        pur_m = PURPOSE_MULT[purpose_v]
-        pur_c = "danger" if purpose_v == "Emergency" else ("warn" if purpose_v == "Operation" else "")
-        fam_m = {"High": ROUTE_EXP_BONUS, "Medium": ROUTE_EXP_MED_MULT, "Low": ROUTE_EXP_LOW_MULT}[fam]
-        fam_c = "good" if fam == "High" else ("warn" if fam == "Medium" else "danger")
-        exp_m = PURPOSE_EXP_BONUS if total_trips > PURPOSE_EXP_THRESHOLD else PURPOSE_EXP_PENALTY
-        exp_c = "good" if total_trips > PURPOSE_EXP_THRESHOLD else "warn"
-        veh_m = 1.0 if veh_exp else VEH_EXP_PENALTY
-        veh_c = "good" if veh_exp else "warn"
-        T_val = live_risk["T"]
-        st.markdown(
-            frow("Task Purpose",      f"{purpose_v}  →  {pur_m:.2f}×",               pur_c) +
-            frow("Route Familiarity", f"R{rf.route_index+1}: {fam} ({fam_trips} trips)  →  {fam_m:.2f}×", fam_c) +
-            frow("O-D Total Trips",   f"{od_trips} trips across all routes",                              exp_c) +
-            frow("Vehicle Exp.",      f"{'Yes' if veh_exp else 'No'}  →  {veh_m:.2f}×", veh_c) +
-            frow("Task Index T",      f"{T_val:.4f}"),
-            unsafe_allow_html=True,
-        )
+        with st.expander(f"Driver", expanded=True):
+            st.markdown(
+                frow("Mileage Band",           f"{profile.mileage_band}  →  {mil_m:.2f}×", mil_c) +
+                frow("Hours Since Shift Start", f"{fat_h:.1f} h (shift {profile.shift_start_time.strftime('%H:%M')})  →  {fat_m:.2f}×", fat_c) +
+                frow("Crash History",           "Yes  →  1.50×" if profile.crash_history else "None  →  1.00×", cr_c) +
+                frow("Driver Index P", f"{P_val:.4f}"),
+                unsafe_allow_html=True,
+            )
 
-        # ── VEHICLE FACTORS ───────────────────────────────────────────────────
-        st.markdown('<div class="section-label">Vehicle Factors (V)</div>', unsafe_allow_html=True)
+        # ── TASK FACTORS (T) ─────────────────────────────────────────────────
+        pur_m  = PURPOSE_MULT[purpose_v]
+        pur_c  = "danger" if purpose_v == "Emergency" else ("warn" if purpose_v == "Operation" else "")
+        fam_m  = {"High": ROUTE_EXP_BONUS, "Medium": ROUTE_EXP_MED_MULT, "Low": ROUTE_EXP_LOW_MULT}[fam]
+        fam_c  = "good" if fam == "High" else ("warn" if fam == "Medium" else "danger")
+        veh_tc = "good" if veh_type_level == "High" else ("warn" if veh_type_level == "Medium" else "danger")
+        T_val  = live_risk["T"]
+
+        with st.expander(f"Task", expanded=False):
+            st.markdown(
+                frow("Task Purpose",      f"{purpose_v}  →  {pur_m:.2f}×",                                          pur_c) +
+                frow("Route Familiarity", f"R{rf.route_index+1}: {fam} ({fam_trips} trips)  →  {fam_m:.2f}×",       fam_c) +
+                frow("Veh. Type Exp.",    f"{vprofile.vehicle_type}: {veh_type_level} ({veh_type_trips} trips) →  {veh_type_m:.2f}×", veh_tc) +
+                frow("Task Index T",      f"{T_val:.4f}"),
+                unsafe_allow_html=True,
+            )
+
+        # ── VEHICLE FACTORS (A) ───────────────────────────────────────────────
         vt_m      = VTYPE_MULT.get(vprofile.vehicle_type, 1.0)
         vt_c      = "danger" if vprofile.vehicle_type == "10T" else (
                      "warn"   if vprofile.vehicle_type in ["5T", "Light Truck"] else "good")
@@ -833,51 +955,57 @@ with right:
         braking_m = weather_snap.braking_mult
         braking_c = "danger" if braking_m >= 1.55 else ("warn" if braking_m > 1.0 else "good")
         A_val     = live_risk["A"]
-        st.markdown(
-            frow("Vehicle",          f"{vprofile.vehicle_number} ({vprofile.vehicle_type})", "") +
-            frow("Vehicle Age",      f"{vehicle_ctx['age']} yrs",
-                 "danger" if vehicle_ctx["age"] >= 10 else ("warn" if vehicle_ctx["age"] >= 6 else "good")) +
-            frow("Last Service",     last_svc, "good" if last_svc != "N/A" else "warn") +
-            frow("Condition",        f"{cond}  →  {cond_m:.2f}×",                         cond_c) +
-            frow("Vehicle Type",     f"{vprofile.vehicle_type}  →  {vt_m:.2f}×",          vt_c) +
-            frow("Braking (weather)",f"{weather_snap.condition}  →  {braking_m:.2f}×",    braking_c) +
-            frow("Safety Tech",      f"{', '.join(vprofile.safe_tech) or 'None'}  →  −{td:.0%}",
-                 "good" if vprofile.safe_tech else "warn") +
-            frow("Vehicle Index A",  f"{A_val:.4f}"),
-            unsafe_allow_html=True,
-        )
 
-        # ── ENVIRONMENT FACTORS ───────────────────────────────────────────────
-        st.markdown('<div class="section-label">Environment Factors (E)</div>', unsafe_allow_html=True)
+        with st.expander(f"Vehicle", expanded=False):
+            st.markdown(
+                frow("Vehicle",           f"{vprofile.vehicle_number} ({vprofile.vehicle_type})", "") +
+                frow("Vehicle Age",       f"{vehicle_ctx['age']} yrs",
+                     "danger" if vehicle_ctx["age"] >= 10 else ("warn" if vehicle_ctx["age"] >= 6 else "good")) +
+                frow("Last Service",      last_svc, "good" if last_svc != "N/A" else "warn") +
+                frow("Condition",         f"{cond}  →  {cond_m:.2f}×",                         cond_c) +
+                frow("Vehicle Type",      f"{vprofile.vehicle_type}  →  {vt_m:.2f}×",          vt_c) +
+                frow("Braking (weather)", f"{weather_snap.condition}  →  {braking_m:.2f}×",    braking_c) +
+                frow("Safety Tech",       f"{', '.join(vprofile.safe_tech) or 'None'}  →  −{td:.0%}",
+                     "good" if vprofile.safe_tech else "warn") + 
+                frow("Vehicle Index A", f"{A_val:.4f}"),
+                unsafe_allow_html=True,
+            )
+
+        # ── ENVIRONMENT FACTORS (E) ───────────────────────────────────────────
         eff_vis = EnvironmentSim.effective_visibility_km(weather_snap, dep_time_v)
-        vis_m   = EnvironmentSim.visibility_mult(weather_snap, dep_time_v)
+        vis_m   = live_risk["vis_m"]      # encodes weather + day/night via visibility cap
+        avg_tm  = live_risk["avg_traffic_m"]
+        E_val   = live_risk["E"]          # = vis_m × avg_traffic_m  (length-weighted)
         vis_c   = "danger" if vis_m >= 1.8 else ("warn" if vis_m >= 1.3 else "good")
         tod     = "Night" if env_ctx["is_night"] else "Day"
         tod_c   = "warn" if env_ctx["is_night"] else "good"
-        segs    = rf.segment_traffic
-        avg_dens = (sum(s.density for s in segs) / len(segs)) if segs else 3.0
-        tr_c    = "warn" if avg_dens >= 4 else "good"
-        E_val   = live_risk["E"]
-        st.markdown(
-            frow("Time of Day",      tod,                                                           tod_c) +
-            frow("Weather",          f"{weather_snap.condition}  ({weather_snap.visibility_km:.1f} km daytime vis)", "") +
-            frow("Visibility",       f"{eff_vis:.1f} km effective  →  {vis_m:.2f}×",              vis_c) +
-            frow("Avg Traffic",      f"{avg_dens:.1f}/5 (weather-adjusted)  →  {avg_dens/3:.2f}×", tr_c) +
-            frow("Environ. Index E", f"{E_val:.4f}"),
-            unsafe_allow_html=True,
-        )
+        tr_c    = "warn" if avg_tm >= 4/3 else "good"
 
-        # ── ROADWAY FACTORS ───────────────────────────────────────────────────
-        st.markdown('<div class="section-label">Roadway Factors (R)</div>', unsafe_allow_html=True)
+        with st.expander(f"Environment", expanded=False):
+            st.markdown(
+                frow("Weather",              f"{weather_snap.condition}", "") +
+                frow("Time of Day",          tod,                                                                             tod_c) +
+                frow("Visibility mult",      f"{eff_vis:.1f} km effective (weather + day/night) → {vis_m:.2f}×  ",         vis_c) +
+                frow("Avg traffic mult",     f"length-weighted density {avg_tm*3:.1f}/5  →  {avg_tm:.2f}×", tr_c) +
+                # frow("E  =  vis × traffic",  f"{vis_m:.2f} × {avg_tm:.2f}  =  {E_val:.4f}",                                 "") +
+                frow("Environment Index E",  f"{E_val:.4f}"),
+                unsafe_allow_html=True,
+            )
+
+        # ── ROADWAY FACTORS (R) ───────────────────────────────────────────────
         h_c    = "danger" if rf.hotspot_count > 5 else ("warn" if rf.hotspot_count > 2 else "good")
         s_c    = "warn" if rf.sharp_turn_count > 3 else "good"
         n_c    = "warn" if rf.narrow_road_count > 3 else "good"
         rc_str = "  ".join(f"{k}: {v*100:.0f}%" for k, v in rf.road_class_breakdown.items())
-        st.markdown(
-            frow("Hotspots",     f"{rf.hotspot_count} segments",     h_c) +
-            frow("Sharp Turns",  f"{rf.sharp_turn_count} segments",  s_c) +
-            frow("Narrow Roads", f"{rf.narrow_road_count} segments", n_c) +
-            frow("Road Classes", rc_str or "N/A") +
-            frow("Route Dist.",  f"{rf.dist_km:.2f} km"),
-            unsafe_allow_html=True,
-        )
+        R_val  = live_risk["R"]
+
+        with st.expander(f"Roadway", expanded=False):
+            st.markdown(
+                frow("Hotspots",        f"{rf.hotspot_count} segments",     h_c) +
+                frow("Sharp Turns",     f"{rf.sharp_turn_count} segments",  s_c) +
+                frow("Narrow Roads",    f"{rf.narrow_road_count} segments", n_c) +
+                frow("Road Classes",    rc_str or "N/A") +
+                frow("Route Dist.",     f"{rf.dist_km:.2f} km") +
+                frow("Roadway Index R", f"{R_val:.4f}"),
+                unsafe_allow_html=True,
+            )
