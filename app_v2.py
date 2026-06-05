@@ -27,7 +27,8 @@ from data_layer_v2 import (
     RouteFeatureExtractor, RouteDB, build_task_context,
     VEHICLE_ELIGIBILITY, ROAD_CLASS_LABELS, estimate_duration_h,
 )
-# ── allocator ─────────────────────────────────────────────────────────────────
+# ── geocoder ──────────────────────────────────────────────────────────────────
+from geocoder import geocode as onemap_geocode, geocode_input, get_cache
 from allocator import Allocator, Task as AllocTask, AllocationResult
 
 st.set_page_config(layout="wide", page_title="Traffic Risk Assessment", page_icon="🛡️")
@@ -1053,8 +1054,8 @@ if st.session_state.app_mode == "Single Task":
     # ── LEFT: task inputs ────────────────────────────────────────────────────
     with left:
         st.markdown('<div class="panel-label">Task Configuration</div>', unsafe_allow_html=True)
-        start_loc = st.text_input("Origin", "Orchard Road, Singapore")
-        end_loc   = st.text_input("Destination", "Changi Airport, Singapore")
+        origin_result = geocode_input("Origin", "Seletar Camp", key="st_origin")
+        dest_result   = geocode_input("Destination", "Nee Soon Camp", key="st_dest")
         c1, c2    = st.columns(2)
         with c1:  dep_time = st.time_input("Departure Time", value=time(10, 0))
         with c2:  purpose  = st.selectbox("Purpose", ["Admin", "Training", "Operation", "Emergency"])
@@ -1068,13 +1069,16 @@ if st.session_state.app_mode == "Single Task":
 
     # ── Single-task analysis ─────────────────────────────────────────────────
     if analyze_btn:
-        try:
-            with st.spinner("Geocoding and computing routes…"):
-                start_coords    = ox.geocoder.geocode(start_loc)
-                end_coords      = ox.geocoder.geocode(end_loc)
-                orig            = ox.distance.nearest_nodes(G, start_coords[1], start_coords[0])
-                dest            = ox.distance.nearest_nodes(G, end_coords[1], end_coords[0])
-                route_sequences = find_candidate_routes(DG, orig, dest)
+        if not origin_result or not dest_result:
+            st.error("Please enter valid origin and destination — no OneMap result found.")
+        else:
+            start_loc, start_lat, start_lon = origin_result
+            end_loc,   end_lat,   end_lon   = dest_result
+            try:
+                with st.spinner("Computing routes…"):
+                    orig            = ox.distance.nearest_nodes(G, start_lon, start_lat)
+                    dest_node       = ox.distance.nearest_nodes(G, end_lon,   end_lat)
+                    route_sequences = find_candidate_routes(DG, orig, dest_node)
                 if not route_sequences:
                     st.error("No route found between the two locations.")
                     st.stop()
@@ -1092,16 +1096,16 @@ if st.session_state.app_mode == "Single Task":
                     st.stop()
                 all_rows = build_results(task_ctx, DG)
                 top3     = top3_by_risk(all_rows)
-            st.session_state.results   = top3
-            st.session_state.sel_idx   = 0
-            st.session_state.task_params = {
-                "origin": start_loc, "destination": end_loc,
-                "purpose": purpose, "dep_time": dep_time,
-                "vehicle_number": vehicle_number,
-            }
-        except Exception as err:
-            st.error(f"Analysis failed: {err}")
-            raise
+                st.session_state.results     = top3
+                st.session_state.sel_idx     = 0
+                st.session_state.task_params = {
+                    "origin": start_loc, "destination": end_loc,
+                    "purpose": purpose, "dep_time": dep_time,
+                    "vehicle_number": vehicle_number,
+                }
+            except Exception as err:
+                st.error(f"Analysis failed: {err}")
+                raise
 
     # ── MIDDLE: results + map ────────────────────────────────────────────────
     with middle:
@@ -1305,17 +1309,23 @@ else:
 
         st.markdown('<div class="hdivider"></div>', unsafe_allow_html=True)
 
-        # ── Manual add (existing) ─────────────────────────────────────────────
+        # ── Manual add ────────────────────────────────────────────────────────
         st.markdown('<div class="section-label">Add Task Manually</div>', unsafe_allow_html=True)
         nodes_list = route_db.nodes()
         sel_node   = st.selectbox("Transport Node", nodes_list, key="ba_node")
 
-        # O-D pairs for this node
-        node_ods    = [(e.origin, e.destination)
-                       for e in route_db.all_valid() if e.node == sel_node]
-        od_labels   = [f"{o}  →  {d}" for o, d in node_ods]
-        sel_od_idx  = st.selectbox("O-D Pair", range(len(od_labels)),
-                                    format_func=lambda i: od_labels[i], key="ba_od")
+        # All O-D pairs for this node in a single searchable selectbox.
+        # Streamlit's native selectbox supports keyboard search so no
+        # separate text input is needed.
+        node_ods  = [(e.origin, e.destination)
+                     for e in route_db.all_valid() if e.node == sel_node]
+        od_labels = [f"{o}  →  {d}" for o, d in node_ods]
+        sel_od_idx = st.selectbox(
+            f"O-D Pair ({len(node_ods)} available)",
+            range(len(od_labels)),
+            format_func=lambda i: od_labels[i],
+            key="ba_od",
+        )
         sel_origin, sel_dest = node_ods[sel_od_idx]
 
         c1, c2 = st.columns(2)
@@ -1382,18 +1392,18 @@ else:
 
         try:
             tasks_for_alloc = []
-            with st.spinner("Geocoding task locations…"):
+            skipped = []
+            with st.spinner("Geocoding task locations via OneMap…"):
                 for t in st.session_state.batch_tasks:
                     dep = time(*[int(x) for x in t["departure_time"].split(":")])
-                    # Geocode O-D to OSMnx node IDs
                     try:
-                        sc = ox.geocoder.geocode(t["origin"] + ", Singapore")
-                        ec = ox.geocoder.geocode(t["destination"] + ", Singapore")
-                    except Exception:
-                        sc = ox.geocoder.geocode("Singapore")
-                        ec = ox.geocoder.geocode("Singapore")
-                    orig_node = ox.distance.nearest_nodes(G, sc[1], sc[0])
-                    dest_node = ox.distance.nearest_nodes(G, ec[1], ec[0])
+                        orig_lat, orig_lon = onemap_geocode(t["origin"])
+                        dest_lat, dest_lon = onemap_geocode(t["destination"])
+                    except ValueError as e:
+                        skipped.append(f"{t['task_id']}: {e}")
+                        continue
+                    orig_node  = ox.distance.nearest_nodes(G, orig_lon, orig_lat)
+                    dest_node  = ox.distance.nearest_nodes(G, dest_lon, dest_lat)
                     route_seqs = find_candidate_routes(DG, orig_node, dest_node)
                     tasks_for_alloc.append(AllocTask(
                         task_id         = t["task_id"],
@@ -1404,6 +1414,8 @@ else:
                         vehicle_number  = t["vehicle_number"],
                         route_sequences = route_seqs,
                     ))
+            for s in skipped:
+                st.warning(f"⚠️ Geocoding failed — task skipped: {s}", icon="⚠️")
 
             allocator = Allocator(
                 driver_db, vehicle_db, trip_db, env_sim, DG,
