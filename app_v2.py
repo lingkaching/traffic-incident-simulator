@@ -706,10 +706,8 @@ def _render_right_panel(result_dict, DG, driver_ctx, vehicle_ctx, env_ctx,
         <div class="hdivider"></div>
         <div style="display:flex;justify-content:space-between;align-items:center;">
             <span style="font-size:11px;color:#6b7280;">Incident Probability</span>
-            <span style="font-family:'DM Mono',monospace;font-size:13px;
-                         font-weight:600;color:#1d4ed8;">{live_prob*100:.3f}%</span>
-        </div>
-        <div style="margin-top:4px;text-align:right;">{risk_pill_html(live_level)}</div>
+            <span style="margin-top:4px;text-align:right;">{risk_pill_html(live_level)}</span>
+        <div </div>
     </div>""", unsafe_allow_html=True)
 
     # P
@@ -859,9 +857,8 @@ def _driver_selection_reason(asgn, all_assignments: list, score_matrix: dict = N
         if gap < 0.005:
             qualifier = "Best available driver for this task — "
         else:
-            qualifier = (f"Fleet trade-off — a better option existed for this task "
-                         f"(best possible {best_possible*100:.3f}% vs assigned {prob*100:.3f}%), "
-                         f"but was allocated elsewhere to protect the fleet. ")
+            qualifier = (f"Fleet trade-off — a lower-risk driver was available for this task "
+                         f"but was kept for another assignment to protect the overall fleet. ")
     else:
         all_probs = [a.risk["prob"] for a in all_assignments]
         qualifier = "Best available — " if prob == min(all_probs) else ""
@@ -1002,20 +999,20 @@ def _fleet_insight(result) -> list[str]:
 
     # gap < 0.5% → assigned driver is essentially the best available
     # gap ≥ 0.5% → a better driver existed; was withheld for fleet reasons
+    bt_lvl = risk_category(bt_prob)
     if gap < 0.005:
         bottleneck_note = (
             f"🎯 Bottleneck: {bt_task.task_id} ({bt_task.origin[:22]} → "
-            f"{bt_task.destination[:22]}) at {bt_prob*100:.3f}%. "
-            f"The assigned driver is the best available for this task "
-            f"(best possible: {best_possible*100:.3f}%). "
+            f"{bt_task.destination[:22]}) — {bt_lvl} risk. "
+            f"The assigned driver is the best available for this task. "
             f"The risk is driven by the task's own conditions — vehicle, route, or environment."
         )
     else:
         bottleneck_note = (
             f"🎯 Bottleneck: {bt_task.task_id} ({bt_task.origin[:22]} → "
-            f"{bt_task.destination[:22]}) at {bt_prob*100:.3f}%. "
-            f"A better driver existed for this task (best possible: {best_possible*100:.3f}%), "
-            f"but was assigned elsewhere to minimise the fleet's worst-case risk. "
+            f"{bt_task.destination[:22]}) — {bt_lvl} risk. "
+            f"A lower-risk driver was available for this task but was assigned elsewhere "
+            f"to minimise the fleet's worst-case risk. "
             f"This is an intentional fleet-level trade-off."
         )
     insights.append(bottleneck_note)
@@ -1024,7 +1021,7 @@ def _fleet_insight(result) -> list[str]:
     if spread < 0.0005:
         insights.append("✅ Risk is well-balanced across all tasks — no single assignment is disproportionately dangerous.")
     elif spread > 0.005:
-        insights.append(f"⚡ Large risk spread ({spread*100:.3f}%) between best and worst task — consider whether the bottleneck task can be rescheduled or replanned.")
+        insights.append(f"⚡ Risk levels vary significantly across tasks — consider whether the bottleneck task can be rescheduled or replanned.")
 
     # ── Multi-task drivers ────────────────────────────────────────────────────
     driver_task_count: dict[str, int] = {}
@@ -1454,7 +1451,9 @@ else:
             max_risk   = result.objective
             max_lvl    = risk_category(max_risk)
             avg_risk   = sum(a.risk["prob"] for a in result.assignments) / max(n_tasks, 1)
+            avg_lvl    = risk_category(avg_risk)
             lvl_col    = {"Low": "#16a34a", "Medium": "#d97706", "High": "#dc2626"}[max_lvl]
+            avg_lvl_col= {"Low": "#16a34a", "Medium": "#d97706", "High": "#dc2626"}[avg_lvl]
 
             st.markdown(f"""
             <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:12px;">
@@ -1467,11 +1466,11 @@ else:
                 <div style="font-size:11px;color:#6b7280;">Unassigned</div>
               </div>
               <div style="background:#f8fafc;border:0.5px solid #e2e5ea;border-radius:8px;padding:10px 12px;">
-                <div style="font-size:20px;font-weight:700;color:{lvl_col};">{max_risk*100:.3f}%</div>
+                <div style="font-size:20px;font-weight:700;color:{lvl_col};">{max_lvl}</div>
                 <div style="font-size:11px;color:#6b7280;">Max risk (objective)</div>
               </div>
               <div style="background:#f8fafc;border:0.5px solid #e2e5ea;border-radius:8px;padding:10px 12px;">
-                <div style="font-size:20px;font-weight:700;color:#111827;">{avg_risk*100:.3f}%</div>
+                <div style="font-size:20px;font-weight:700;color:{avg_lvl_col};">{avg_lvl}</div>
                 <div style="font-size:11px;color:#6b7280;">Avg risk per task</div>
               </div>
             </div>""", unsafe_allow_html=True)
@@ -1510,7 +1509,7 @@ else:
                                          background:{'#dbeafe' if selected else '#f3f4f6'};
                                          color:{'#1d4ed8' if selected else '#6b7280'};
                                          padding:2px 8px;border-radius:20px;">
-                                {lvl_icon} {lvl} · {prob*100:.3f}%
+                                {lvl_icon} {lvl}
                             </span>
                         </div>
                         <div style="font-family:'DM Mono',monospace;font-size:11px;
@@ -1673,7 +1672,7 @@ else:
                             {task.task_id} · {d.name}
                         </span>
                         <span style="font-size:12px;font-weight:500;
-                                     color:{lvl_col};">{lvl} · {prob*100:.3f}%</span>
+                                     color:{lvl_col};">{lvl}</span>
                     </div>
                     <div style="font-size:11px;color:#6b7280;margin-bottom:8px;">
                         {task.origin[:30]} → {task.destination[:30]}<br>
