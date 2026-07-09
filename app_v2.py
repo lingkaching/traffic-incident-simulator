@@ -19,7 +19,7 @@ import random
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
-from datetime import time
+from datetime import date, datetime, time, timedelta
 
 # ── data layer ────────────────────────────────────────────────────────────────
 from data_layer_v2 import (
@@ -29,6 +29,71 @@ from data_layer_v2 import (
 )
 # ── geocoder ──────────────────────────────────────────────────────────────────
 from geocoder import geocode as onemap_geocode, geocode_input, get_cache
+
+# ── Location alias map ────────────────────────────────────────────────────────
+# Add entries here when OneMap cannot find a location name from your task file.
+# Keys are matched case-insensitively to the name in the Excel/CSV.
+LOCATION_ALIASES: dict[str, str] ={'PASIR LABAR CAMP': 'PASIR LABA CAMP',
+ 'LIM CHU KANG TP 11': 'LIM CHU KANG ROAD',
+ 'LOR ASRAMA': 'MANDAI CAMP II',
+ 'PLAB': 'Paya Lebar Air Base',
+ 'SKGH': 'SENGKANG GENERAL HOSPITAL',
+ 'SENG KANG HOSPITAL': 'SENGKANG GENERAL HOSPITAL',
+ 'KTPH': 'Khoo Teck Puat Hospital',
+ 'LIM CHU KANG TP 7': 'LIM CHU KANG ROAD',
+ 'LIM CHU KANG TP 4': 'LIM CHU KANG ROAD',
+ 'SKH': 'SENGKANG GENERAL HOSPITAL',
+ 'OTH': 'Our Tampines Hub',
+ 'KKH': "KK Women's and Children's Hospital",
+ 'KRANJI CAMP 3': 'KRANJI CAMP',
+ 'PYLMC': 'Paya Lebar Air Base',
+ 'KAKI BUIKIT CAMP': 'KAKI BUKIT CAMP',
+ 'MUTF': 'MURAI CAMP',
+ 'SAFTI MI': 'SAFTI Military Institute',
+ 'LORONG ASRAMA': 'MANDAI CAMP II',
+ 'TENGAH AIRBASE': 'TENGAH AIR BASE',
+ 'JURONG CAMP 1': 'JURONG CAMP',
+ 'LIM CHU KANG LIM CHU KANG TP 7': 'LIM CHU KANG ROAD',
+ 'SEMBAWANG CQAMP': 'SEMBAWANG CAMP',
+ 'SUNGEI GEONG CAMP': 'SUNGEI GEDONG CAMP',
+ 'SAFTI TO CAMP': 'SAFTI Military Institute',
+ 'CLEMENTI TO SAF FERRY TERMINAL': 'CLEMENTI CAMP',
+ 'SEMBAWANG WHARVES': 'SEMBAWANG PARK',
+ 'JURONG CAMP 2': 'JURONG CAMP',
+ 'LONBR ASRAMA': 'MANDAI CAMP II',
+ 'CCDC': 'MANDAI CAMP II',
+ 'CCDC TO NEE': 'MANDAI CAMP II',
+ 'EBUA TO TENGAH': 'MANDAI CAMP II',
+ 'GEDONG TO SARIMBUN': 'Sungei Gedong Camp',
+ 'NEESOON CAMP': 'NEE SOON CAMP',
+ 'POYAN': 'LIM CHU KANG ROAD',
+ 'PLC': 'Pasir Laba Camp',
+ 'NTFGH': 'Ng Teng Fong General Hospital',
+ 'MAJU MEDICAL CENTRE': 'MAJU CAMP',
+ 'TUAS TRANPORT NODE': 'Tuas Naval Base',
+ 'BENOI SHIPYARD': '23 Benoi Rd',
+ 'PASIR LEBAR CAMP': 'PASIR LABA CAMP',
+ 'ARMY LOGISTICS BASE': '601 Old Choa Chu Kang Rd',
+ 'SEMBAWANG AIR BASE': 'SEMBAWANG AIR BASE',
+ 'CHONG PANG CAMP': 'CHONG PANG CAMP',
+ 'CHANGI TRANSPORT NODE': 'Changi Air Base',
+ 'TUAS EXPLOSIVE JETTY': 'Tuas South Ave 3',
+ 'PULAU SUDONG (LITA OCEAN)': '4 Pioneer',
+ 'MAIDAI HILL CAMP': 'MANDAI HILL CAMP',
+ 'LOR ASRAMA (TP5)': 'MANDAI CAMP II',
+ 'KAHTIB CAMP': 'KHATIB CAMP',
+ 'NEE SOON CAMP 500M OPEN RANGE': 'NEE SOON CAMP',
+ 'SAF YACHT CLUB': 'SAF YACHT CLUB',
+ 'SAF FERY TERMINAL': 'SAF FERRY TERMINAL',
+ 'PALAU BRANI': '11 Brani Way',
+ 'PULAU BRANI': '11 Brani Way',
+ 'HENDOM CAMP': 'HENDON CAMP',
+ 'NATIONAL SHOOTING CENTRE': 'National Shooting Centre',
+ 'NATION SHOOTING CENTRE': 'National Shooting Centre'}
+
+def _resolve_location(name: str) -> str:
+    """Apply LOCATION_ALIASES before geocoding."""
+    return LOCATION_ALIASES.get(name.strip().upper(), name)
 from allocator import Allocator, Task as AllocTask, AllocationResult
 
 st.set_page_config(layout="wide", page_title="Traffic Risk Assessment", page_icon="🛡️")
@@ -568,9 +633,9 @@ def render_map(G_raw, result: dict, risk: dict) -> folium.Map:
                 font-size:11px;font-family:sans-serif;z-index:9999;
                 box-shadow:0 2px 6px rgba(0,0,0,.1);">
         <b>Contribution of Route Risk</b><br>
-        <span style="color:#16a34a;">●</span> &lt;1% &nbsp;
-        <span style="color:#d97706;">●</span> 1–5% &nbsp;
-        <span style="color:#dc2626;">●</span> &gt;5%<br>
+        <span style="color:#16a34a;">●</span> Low &nbsp;
+        <span style="color:#d97706;">●</span> Medium &nbsp;
+        <span style="color:#dc2626;">●</span> High<br>
         <span style="font-size:10px;color:#6b7280;">Hover for exact % of total risk</span><br>
         <span>⚠️</span> Collision Hotspot
     </div>"""
@@ -1223,25 +1288,51 @@ else:
                 try:
                     import pandas as pd
                     df = pd.read_excel(uploaded, sheet_name="Tasks", dtype=str)
-                    df.columns = [c.strip().lower().replace(" ","_") for c in df.columns]
+                    # Flexible column normalisation: lowercase, strip, collapse non-alnum to _
+                    import re as _re
+                    df.columns = [_re.sub(r"[^a-z0-9]+", "_",
+                                          c.strip().lower()).strip("_")
+                                  for c in df.columns]
 
-                    # Required columns
-                    required = {"task_id","node","origin","destination",
-                                "departure_time","purpose","vehicle_number"}
+                    # Alias map: accept various header phrasings → canonical name
+                    _aliases = {
+                        "task_id":        ["task_id","taskid","id","task"],
+                        "origin":         ["origin","from","start","origin_location"],
+                        "destination":    ["destination","to","end","dest","destination_location"],
+                        "departure_time": ["departure_time","departure","departure_datetime",
+                                           "departure_yyyy_mm_dd_hh_mm",
+                                           "departure__yyyy_mm_dd_hh_mm_",
+                                           "start_time","dep_time","dep"],
+                        "end_datetime":   ["end_datetime","end_time","end",
+                                           "end__yyyy_mm_dd_hh_mm_",
+                                           "end_yyyy_mm_dd_hh_mm","end_date_time"],
+                        "purpose":        ["purpose","task_purpose","type"],
+                        "vehicle_number": ["vehicle_number","vehicle","vehicle_no",
+                                           "veh","veh_number"],
+                    }
+                    rename_map = {}
+                    for canonical, alts in _aliases.items():
+                        for col in df.columns:
+                            if col in alts and canonical not in df.columns:
+                                rename_map[col] = canonical
+                    if rename_map:
+                        df = df.rename(columns=rename_map)
+
+                    required = {"task_id","origin","destination","departure_time",
+                                "purpose","vehicle_number"}
                     missing  = required - set(df.columns)
                     if missing:
-                        st.error(f"Missing columns: {', '.join(missing)}")
+                        st.error(f"Missing columns: {', '.join(sorted(missing))}. "
+                                 f"Found: {', '.join(sorted(df.columns))}")
                     else:
-                        # Drop blank/note rows
                         df = df.dropna(subset=["task_id","origin","destination",
                                                 "departure_time","purpose","vehicle_number"])
-                        df = df[~df["task_id"].str.startswith("←")]
+                        df = df[~df["task_id"].astype(str).str.startswith("←")]
 
                         errors  = []
                         parsed  = []
                         valid_veh  = {v.vehicle_number for v in vehicle_db.all()}
                         valid_purp = {"Admin","Training","Operation","Emergency"}
-                        # Build valid O-D lookup (case-insensitive)
                         valid_ods  = {(e.origin.upper(), e.destination.upper())
                                       for e in route_db.all_valid()}
 
@@ -1252,27 +1343,37 @@ else:
                             dep   = str(row["departure_time"]).strip()
                             purp  = str(row["purpose"]).strip()
                             veh   = str(row["vehicle_number"]).strip()
+                            end_raw = str(row.get("end_datetime","")).strip() if "end_datetime" in df.columns else ""
 
-                            # Validate departure time
+                            # Parse departure — supports "YYYY-MM-DD HH:MM" or "HH:MM"
+                            dep_date_str = None
                             try:
-                                h, m = dep.split(":")
-                                dep_time_obj = time(int(h), int(m))
-                                dep_str = dep_time_obj.strftime("%H:%M")
+                                if len(dep) > 5:  # full datetime
+                                    dep_dt_obj = datetime.strptime(dep, "%Y-%m-%d %H:%M")
+                                    dep_date_str = dep_dt_obj.date().isoformat()
+                                    dep_str = dep_dt_obj.strftime("%H:%M")
+                                else:
+                                    h, m = dep.split(":")
+                                    time(int(h), int(m))
+                                    dep_str = dep
                             except Exception:
-                                errors.append(f"Row {tid}: invalid departure_time '{dep}' (use HH:MM)")
+                                errors.append(f"Row {tid}: invalid departure_time '{dep}' (use YYYY-MM-DD HH:MM or HH:MM)")
                                 continue
 
-                            # Validate purpose
+                            # Parse end datetime (optional)
+                            end_dt_str = None
+                            if end_raw and end_raw.lower() not in ("nan","none",""):
+                                try:
+                                    end_dt_str = datetime.strptime(end_raw, "%Y-%m-%d %H:%M").strftime("%Y-%m-%d %H:%M")
+                                except Exception:
+                                    pass  # ignore bad end times
+
                             if purp not in valid_purp:
                                 errors.append(f"Row {tid}: invalid purpose '{purp}'")
                                 continue
-
-                            # Validate vehicle
                             if veh not in valid_veh:
                                 errors.append(f"Row {tid}: vehicle '{veh}' not found")
                                 continue
-
-                            # Validate O-D
                             if (orig.upper(), dest.upper()) not in valid_ods:
                                 errors.append(f"Row {tid}: O-D '{orig} → {dest}' not in route.json")
                                 continue
@@ -1281,7 +1382,9 @@ else:
                                 "task_id":        tid,
                                 "origin":         orig,
                                 "destination":    dest,
+                                "departure_date": dep_date_str,
                                 "departure_time": dep_str,
+                                "end_datetime":   end_dt_str,
                                 "purpose":        purp,
                                 "vehicle_number": veh,
                             })
@@ -1308,6 +1411,8 @@ else:
 
         # ── Manual add ────────────────────────────────────────────────────────
         st.markdown('<div class="section-label">Add Task Manually</div>', unsafe_allow_html=True)
+        if st.session_state.get("_task_add_warning"):
+            st.warning(st.session_state.pop("_task_add_warning"))
         nodes_list = route_db.nodes()
         sel_node   = st.selectbox("Transport Node", nodes_list, key="ba_node")
 
@@ -1325,9 +1430,19 @@ else:
         )
         sel_origin, sel_dest = node_ods[sel_od_idx]
 
-        c1, c2 = st.columns(2)
-        with c1:  ba_dep  = st.time_input("Departure", value=time(8, 0), key="ba_dep")
-        with c2:  ba_purp = st.selectbox("Purpose", ["Admin","Training","Operation","Emergency"], key="ba_purp")
+        c1, c2, c3 = st.columns(3)
+        with c1:  ba_dep_date = st.date_input("Departure Date", value=date.today(), key="ba_dep_date")
+        with c2:  ba_dep      = st.time_input("Departure Time", value=time(8, 0),   key="ba_dep")
+        with c3:  ba_purp     = st.selectbox("Purpose", ["Admin","Training","Operation","Emergency"], key="ba_purp")
+
+        ba_has_end = st.checkbox("Set End Date/Time", value=False, key="ba_has_end")
+        if ba_has_end:
+            ce1, ce2 = st.columns(2)
+            with ce1: ba_end_date = st.date_input("End Date", value=ba_dep_date, key="ba_end_date")
+            with ce2: ba_end_time = st.time_input("End Time", value=time(10, 0), key="ba_end_time")
+        else:
+            ba_end_date = ba_dep_date
+            ba_end_time = None
 
         veh_opts   = {v.vehicle_number: f"{v.vehicle_number} ({v.vehicle_type})"
                       for v in vehicle_db.all()}
@@ -1337,13 +1452,29 @@ else:
         add_btn    = st.button("➕  Add Task", use_container_width=True)
         if add_btn:
             tid = f"T{len(st.session_state.batch_tasks)+1:03d}"
+            end_dt_str = None
+            if ba_has_end and ba_end_time:
+                _dep_dt_check = datetime.combine(ba_dep_date, ba_dep)
+                _end_dt_check = datetime.combine(ba_end_date, ba_end_time)
+                if _end_dt_check <= _dep_dt_check:
+                    # Store in session_state instead of calling st.warning() here —
+                    # st.rerun() below fires immediately and would wipe it before
+                    # the browser ever renders this frame.
+                    st.session_state["_task_add_warning"] = (
+                        f"⚠️ End datetime ({_end_dt_check.strftime('%d/%m/%Y %H:%M')}) is not "
+                        f"after the departure time ({_dep_dt_check.strftime('%d/%m/%Y %H:%M')}) — "
+                        f"ignoring it; duration will be estimated from the route instead.")
+                else:
+                    end_dt_str = _end_dt_check.strftime("%Y-%m-%d %H:%M")
             st.session_state.batch_tasks.append({
-                "task_id":        tid,
-                "origin":         sel_origin,
-                "destination":    sel_dest,
-                "departure_time": ba_dep.strftime("%H:%M"),
-                "purpose":        ba_purp,
-                "vehicle_number": ba_veh,
+                "task_id":         tid,
+                "origin":          sel_origin,
+                "destination":     sel_dest,
+                "departure_date":  ba_dep_date.strftime("%Y-%m-%d"),
+                "departure_time":  ba_dep.strftime("%H:%M"),
+                "end_datetime":    end_dt_str,
+                "purpose":         ba_purp,
+                "vehicle_number":  ba_veh,
             })
             st.rerun()
 
@@ -1357,9 +1488,11 @@ else:
                 col_t, col_rm = st.columns([10, 1])
                 with col_t:
                     vtype = vehicle_db.get(t["vehicle_number"]).vehicle_type
+                    end_str = f" → {t['end_datetime']}" if t.get("end_datetime") else ""
+                    dep_str = f"{t.get('departure_date','')} {t['departure_time']}"
                     st.markdown(
                         f'<div style="font-size:12px;padding:5px 0;line-height:1.6;">'
-                        f'<b>{t["task_id"]}</b> · {t["departure_time"]} · {t["purpose"]}<br>'
+                        f'<b>{t["task_id"]}</b> · {dep_str}{end_str} · {t["purpose"]}<br>'
                         f'<span style="color:#6b7280;">{t["origin"][:22]}… → {t["destination"][:22]}…</span><br>'
                         f'<span style="color:#6b7280;">{t["vehicle_number"]} ({vtype})</span>'
                         f'</div>', unsafe_allow_html=True)
@@ -1389,31 +1522,71 @@ else:
 
         try:
             tasks_for_alloc = []
-            skipped = []
+            st.session_state.pop("_override_dist", None)
             with st.spinner("Geocoding task locations via OneMap…"):
                 for t in st.session_state.batch_tasks:
                     dep = time(*[int(x) for x in t["departure_time"].split(":")])
-                    try:
-                        orig_lat, orig_lon = onemap_geocode(t["origin"])
-                        dest_lat, dest_lon = onemap_geocode(t["destination"])
-                    except ValueError as e:
-                        skipped.append(f"{t['task_id']}: {e}")
+                    # Skip task if origin or destination is blank
+                    if not str(t.get("origin","")).strip() or not str(t.get("destination","")).strip():
+                        st.warning(f"⚠️ {t['task_id']}: origin or destination is empty — task skipped.")
                         continue
-                    orig_node  = ox.distance.nearest_nodes(G, orig_lon, orig_lat)
-                    dest_node  = ox.distance.nearest_nodes(G, dest_lon, dest_lat)
-                    route_seqs = find_candidate_routes(DG, orig_node, dest_node)
+
+                    def _geocode_loc(name, task_id, role):
+                        resolved = _resolve_location(name)
+                        if resolved != name:
+                            st.info(f"ℹ️ {task_id}: '{name}' → '{resolved}' (alias).")
+                        try:
+                            return onemap_geocode(resolved)
+                        except Exception as e:
+                            st.warning(f"⚠️ {task_id}: geocoding failed for {role} '{name}' ({e}) — task skipped.")
+                            return None
+
+                    orig_result = _geocode_loc(t["origin"],     t["task_id"], "origin")
+                    dest_result = _geocode_loc(t["destination"], t["task_id"], "destination")
+                    if orig_result is None or dest_result is None:
+                        continue
+                    orig_lat, orig_lon = orig_result
+                    dest_lat, dest_lon = dest_result
+                    try:
+                        orig_node  = ox.distance.nearest_nodes(G, orig_lon, orig_lat)
+                        dest_node  = ox.distance.nearest_nodes(G, dest_lon, dest_lat)
+                        route_seqs = find_candidate_routes(DG, orig_node, dest_node)
+                    except Exception as e:
+                        st.warning(f"⚠️ Route finding failed for {t['task_id']}: {e}.")
+                        route_seqs = []
+                    dep_date = None
+                    if t.get("departure_date"):
+                        try:
+                            from datetime import date as _date
+                            dep_date = _date.fromisoformat(t["departure_date"])
+                        except Exception:
+                            pass
+                    end_dt = None
+                    if t.get("end_datetime"):
+                        try:
+                            _end_dt_candidate = datetime.fromisoformat(t["end_datetime"])
+                            _dep_dt_check     = datetime.combine(dep_date or date.today(), dep)
+                            if _end_dt_candidate <= _dep_dt_check:
+                                st.warning(
+                                    f"⚠️ {t['task_id']}: end datetime "
+                                    f"({_end_dt_candidate.strftime('%d/%m/%Y %H:%M')}) is not after "
+                                    f"the departure time ({_dep_dt_check.strftime('%d/%m/%Y %H:%M')}) "
+                                    f"— ignoring it; duration will be estimated from the route instead.")
+                            else:
+                                end_dt = _end_dt_candidate
+                        except Exception:
+                            pass
                     tasks_for_alloc.append(AllocTask(
                         task_id         = t["task_id"],
                         origin          = t["origin"],
                         destination     = t["destination"],
                         departure_time  = dep,
+                        departure_date  = dep_date,
+                        end_datetime    = end_dt,
                         purpose         = t["purpose"],
                         vehicle_number  = t["vehicle_number"],
                         route_sequences = route_seqs,
                     ))
-            for s in skipped:
-                st.warning(f"⚠️ Geocoding failed — task skipped: {s}", icon="⚠️")
-
             allocator = Allocator(
                 driver_db, vehicle_db, trip_db, env_sim, DG,
                 compute_P_fn          = compute_P,
@@ -1445,18 +1618,49 @@ else:
                 <div style="font-size:12px;">Add tasks and press <b>Allocate</b>.</div>
             </div>""", unsafe_allow_html=True)
         else:
+            # ── Helper: risk badge / pills HTML (used across this panel) ──────
+            def _badge(lvl):
+                c = {"Low":"#16a34a","Medium":"#d97706","High":"#dc2626"}.get(lvl,"#6b7280")
+                return (f'<span style="background:{c};color:#fff;border-radius:9999px;'
+                        f'padding:2px 12px;font-size:11px;font-weight:700;">{lvl}</span>')
+
+            def _pills(dist):
+                out = ""
+                for l in ["High","Medium","Low"]:
+                    if dist.get(l,0):
+                        c = {"High":"#ef4444","Medium":"#f59e0b","Low":"#22c55e"}[l]
+                        out += (f'<span style="background:{c};color:#fff;border-radius:9999px;'
+                               f'padding:3px 14px;font-size:12px;font-weight:700;margin-right:4px;">'
+                               f'{l} {dist[l]}</span>')
+                return out
+
+            def _th(txt, w=""):
+                ws = f'width:{w};' if w else ""
+                return (f'<th style="padding:6px 10px;background:#f1f5f9;font-weight:600;'
+                        f'text-align:left;border-bottom:1px solid #e2e8f0;'
+                        f'font-size:11px;color:#374151;{ws}">{txt}</th>')
+
+            def _td(content, extra=""):
+                return (f'<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;'
+                        f'font-size:12px;vertical-align:middle;{extra}">{content}</td>')
+
             # ── Fleet summary strip ───────────────────────────────────────────
             n_tasks    = len(result.assignments)
             n_unassign = len(result.unassigned)
-            max_risk   = result.objective
+            # Recomputed live (not result.objective) so it reflects overrides
+            max_risk   = max((a.risk["prob"] for a in result.assignments), default=0.0)
             max_lvl    = risk_category(max_risk)
             avg_risk   = sum(a.risk["prob"] for a in result.assignments) / max(n_tasks, 1)
             avg_lvl    = risk_category(avg_risk)
             lvl_col    = {"Low": "#16a34a", "Medium": "#d97706", "High": "#dc2626"}[max_lvl]
             avg_lvl_col= {"Low": "#16a34a", "Medium": "#d97706", "High": "#dc2626"}[avg_lvl]
 
+            from collections import Counter as _Ct1
+            _driver_counts     = _Ct1(a.driver_ctx["profile"].driver_id for a in result.assignments)
+            n_multi_task_drivers = sum(1 for c in _driver_counts.values() if c > 1)
+
             st.markdown(f"""
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:12px;">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:8px;margin-bottom:8px;">
               <div style="background:#f8fafc;border:0.5px solid #e2e5ea;border-radius:8px;padding:10px 12px;">
                 <div style="font-size:20px;font-weight:700;color:#111827;">{n_tasks}</div>
                 <div style="font-size:11px;color:#6b7280;">Assigned</div>
@@ -1466,23 +1670,68 @@ else:
                 <div style="font-size:11px;color:#6b7280;">Unassigned</div>
               </div>
               <div style="background:#f8fafc;border:0.5px solid #e2e5ea;border-radius:8px;padding:10px 12px;">
+                <div style="font-size:20px;font-weight:700;color:#111827;">{n_multi_task_drivers}</div>
+                <div style="font-size:11px;color:#6b7280;">Multi-task Drivers</div>
+              </div>
+              <div style="background:#f8fafc;border:0.5px solid #e2e5ea;border-radius:8px;padding:10px 12px;">
                 <div style="font-size:20px;font-weight:700;color:{lvl_col};">{max_lvl}</div>
-                <div style="font-size:11px;color:#6b7280;">Max risk (objective)</div>
+                <div style="font-size:11px;color:#6b7280;">Highest Risk Task</div>
               </div>
               <div style="background:#f8fafc;border:0.5px solid #e2e5ea;border-radius:8px;padding:10px 12px;">
                 <div style="font-size:20px;font-weight:700;color:{avg_lvl_col};">{avg_lvl}</div>
-                <div style="font-size:11px;color:#6b7280;">Avg risk per task</div>
+                <div style="font-size:11px;color:#6b7280;">Avg Risk per Task</div>
               </div>
             </div>""", unsafe_allow_html=True)
+
+            # ── Risk distribution (horizontal bar chart) ──────────────────────
+            from collections import Counter as _Ct2
+            _rd = _Ct2(risk_category(a.risk["prob"]) for a in result.assignments)
+            _rc = {"High":"#ef4444","Medium":"#f59e0b","Low":"#22c55e"}
+            _rd_total = n_tasks or 1
+            _bars = ""
+            for l in ["High","Medium","Low"]:
+                _cnt = _rd.get(l, 0)
+                _pct = (_cnt / _rd_total * 100) if _rd_total else 0
+                _bars += f"""
+                <div style="display:flex;align-items:center;margin-bottom:4px;">
+                    <div style="width:64px;font-size:12px;color:#374151;font-weight:600;">{l}</div>
+                    <div style="flex:1;background:#f1f5f9;border-radius:4px;height:16px;
+                                position:relative;overflow:hidden;">
+                        <div style="width:{_pct:.1f}%;background:{_rc[l]};height:100%;
+                                    border-radius:4px;"></div>
+                    </div>
+                    <div style="width:32px;text-align:right;font-size:12px;color:#374151;
+                                font-weight:700;margin-left:8px;">{_cnt}</div>
+                </div>"""
+            st.markdown('<div class="section-label" style="margin-top:16px;">📊 Risk Distribution</div>',
+                        unsafe_allow_html=True)
+            st.markdown(f'<div style="margin-bottom:12px;margin-top:6px;">{_bars}</div>',
+                        unsafe_allow_html=True)
+
+
+            # ── Before / After override risk distribution ─────────────────────
+            if "_override_dist" in st.session_state:
+                _od = st.session_state["_override_dist"]
+                st.markdown(
+                    f'<div style="background:#f8fafc;border:1px solid #e2e8f0;'
+                    f'border-left:4px solid #6b7280;border-radius:6px;'
+                    f'padding:10px 14px;margin-bottom:12px;">'
+                    f'<div style="font-size:12px;margin-bottom:5px;">'
+                    f'<b>Before:&nbsp;</b>{_pills(_od["before"])}</div>'
+                    f'<div style="font-size:12px;">'
+                    f'<b>After:&nbsp;&nbsp;</b>{_pills(_od["after"])}</div></div>',
+                    unsafe_allow_html=True)
 
             # ── Warnings ──────────────────────────────────────────────────────
             if result.warnings:
                 for w in result.warnings:
                     st.warning(w, icon="⚠️")
 
+
             # ── Assignment cards ──────────────────────────────────────────────
-            st.markdown('<div class="section-label">Assignments</div>', unsafe_allow_html=True)
-            for i, asgn in enumerate(result.assignments):
+            st.markdown('<div class="section-label">📋 Assignments</div>', unsafe_allow_html=True)
+            for i, asgn in enumerate(
+                        sorted(result.assignments, key=lambda a: a.task.task_id)):
                 task  = asgn.task
                 d     = asgn.driver_ctx["profile"]
                 rf    = asgn.route_features
@@ -1494,7 +1743,16 @@ else:
                 border   = "2px solid #3b82f6" if selected else "1.5px solid #e2e5ea"
                 bg       = "#eff6ff"           if selected else "#ffffff"
                 vtype    = vehicle_db.get(task.vehicle_number).vehicle_type
-                fat_warn = " ⚠️" if asgn.fatigue_at_dep > 6 else ""
+
+                _dep_dt = datetime.combine(task.departure_date or date.today(), task.departure_time)
+                if task.end_datetime:
+                    _end_dt = (task.end_datetime if isinstance(task.end_datetime, datetime)
+                               else datetime.combine(task.departure_date or date.today(), task.end_datetime))
+                else:
+                    _end_dt = _dep_dt + timedelta(hours=estimate_duration_h(rf.dist_km))
+                _dep_s = _dep_dt.strftime("%d/%m/%Y %H:%M")
+                _end_s = (_end_dt.strftime("%d/%m/%Y %H:%M") if _end_dt.date() != _dep_dt.date()
+                          else _end_dt.strftime("%H:%M"))
 
                 col_card, col_sel = st.columns([11, 1])
                 with col_card:
@@ -1515,10 +1773,9 @@ else:
                         <div style="font-family:'DM Mono',monospace;font-size:11px;
                                     color:#6b7280;margin-top:3px;line-height:1.7;">
                             {task.origin[:28]} → {task.destination[:28]}<br>
-                            {task.departure_time.strftime("%H:%M")} · {task.purpose}
+                            {_dep_s} → {_end_s} · {task.purpose}
                             · R{rf.route_index+1} · {rf.dist_km:.1f} km
                             · {task.vehicle_number} ({vtype})
-                            · Fatigue {asgn.fatigue_at_dep:.1f}h{fat_warn}
                         </div>
                     </div>""", unsafe_allow_html=True)
                 with col_sel:
@@ -1527,39 +1784,285 @@ else:
                         st.session_state.alloc_sel_idx = i
                         st.rerun()
 
-            # ── Map for selected assignment ───────────────────────────────────
-            if result.assignments:
-                st.markdown('<div class="section-label" style="margin-top:12px;">Route Map</div>',
-                            unsafe_allow_html=True)
-                sel_asgn = result.assignments[st.session_state.alloc_sel_idx]
-                map_result_dict = {
-                    "route_features": sel_asgn.route_features,
-                    "driver_ctx":     sel_asgn.driver_ctx,
-                    "vehicle_ctx":    sel_asgn.vehicle_ctx,
-                    "env_ctx":        sel_asgn.env_ctx,
-                    "purpose":        sel_asgn.task.purpose,
-                    "dep_time":       sel_asgn.task.departure_time,
-                }
-                m = render_map(G, map_result_dict, sel_asgn.risk)
-                st_folium(m, width=None, height=400, use_container_width=True, returned_objects=[])
+            # ── Repeated Drivers ──────────────────────────────────────────────
+            from collections import Counter
+            driver_task_count = Counter(
+                asgn.driver_ctx["profile"].driver_id
+                for asgn in result.assignments
+            )
+            repeated = {did: cnt for did, cnt in driver_task_count.items() if cnt > 1}
 
-            # ── Driver workload table ─────────────────────────────────────────
-            st.markdown('<div class="section-label" style="margin-top:12px;">Driver Workload</div>',
+            # ── Build score matrix for alternatives (best driver per task) ────
+            # For each task, find lowest-risk other driver who is available on a diff day
+            _score_matrix = getattr(result, "score_matrix", {})
+
+            def _best_alt(asgn):
+                """
+                Return (driver_profile, risk_label, prob, route_index) for the best
+                schedulable (driver, route) combination for this task across all routes.
+                Overriding to this driver will also switch to this route (see apply_btn
+                logic below), so the suggestion and the applied result stay consistent.
+                Returns (None, None, None, None) if no schedulable alternative found.
+                """
+                task  = asgn.task
+                cur_d = asgn.driver_ctx["profile"].driver_id
+
+                candidates = sorted(
+                    [(did, ridx, v["prob"])
+                     for (tid, did, ridx), v in _score_matrix.items()
+                     if tid == task.task_id and did != cur_d],
+                    key=lambda x: x[2]  # lowest risk first
+                )
+                for did, ridx, prob in candidates:
+                    if task.departure_date:
+                        other_same_day = any(
+                            a.task.departure_date == task.departure_date
+                            and a.driver_ctx["profile"].driver_id == did
+                            and a.task.task_id != task.task_id
+                            for a in result.assignments
+                        )
+                        if other_same_day:
+                            continue
+                    dp = driver_db.get(did)
+                    if dp is None:
+                        continue
+                    return dp, risk_category(prob), prob, ridx
+                return None, None, None, None
+
+            # ── #3: Repeated Drivers table ────────────────────────────────────
+            if repeated:
+                st.markdown('<div class="section-label" style="margin-top:16px;">🔄 Repeated Drivers</div>',
+                            unsafe_allow_html=True)
+                n_t_total = len(result.assignments) + len(result.unassigned)
+                n_d_total = len(list(driver_db.all())) if hasattr(driver_db, "all") else len({a.driver_ctx["profile"].driver_id for a in result.assignments})
+                n_rep_drivers = len(repeated)
+                if n_d_total >= n_t_total:
+                    st.success(f"One-driver-one-task is possible ({n_d_total} drivers, {n_t_total} tasks). "
+                               f"{n_rep_drivers} driver(s) currently hold multiple tasks — can be resolved via override.", icon="ℹ️")
+                else:
+                    short = n_t_total - n_d_total
+                    st.info(f"{n_d_total} drivers for {n_t_total} tasks — "
+                            f"at least {short} driver(s) must take multiple tasks (unavoidable). "
+                            f"{n_rep_drivers} driver(s) currently repeated.", icon="ℹ️")
+
+                for did, cnt in repeated.items():
+                    driver_asgns = [a for a in result.assignments
+                                    if a.driver_ctx["profile"].driver_id == did]
+                    dname   = driver_asgns[0].driver_ctx["profile"].name
+                    task_ids = ", ".join(a.task.task_id for a in driver_asgns)
+                    rows_html = ""
+                    for a in driver_asgns:
+                        t = a.task
+                        dep_s = (t.departure_date.strftime("%d/%m/%Y ") if t.departure_date else "") + t.departure_time.strftime("%H:%M")
+                        if t.end_datetime:
+                            _end_dt_rd = (t.end_datetime if isinstance(t.end_datetime, datetime)
+                                          else datetime.combine(t.departure_date or date.today(), t.end_datetime))
+                        else:
+                            _dep_dt_rd = datetime.combine(t.departure_date or date.today(), t.departure_time)
+                            _end_dt_rd = _dep_dt_rd + timedelta(
+                                hours=estimate_duration_h(a.route_features.dist_km))
+                        end_s = _end_dt_rd.strftime("%d/%m/%Y %H:%M")
+                        lvl   = risk_category(a.risk["prob"])
+                        ri_r  = getattr(a.route_features, "route_index", 0)
+                        route = f"{t.origin[:14]}→{t.destination[:14]}"
+                        cur_cell = f'{dname} (R{ri_r+1})<br>{_badge(lvl)}'
+                        alt_d2, alt_lbl2, _, alt_ri2 = _best_alt(a)
+                        if alt_d2:
+                            alt_cell = f"{alt_d2.name} (R{alt_ri2+1})<br>{_badge(alt_lbl2)}"
+                        else:
+                            alt_cell = '<span style="color:#9ca3af;font-style:italic;">No option</span>'
+                        rows_html += (
+                            f"<tr>"
+                            + _td(f'<b>{t.task_id}</b>')
+                            + _td(dep_s, "color:#374151;")
+                            + _td(end_s, "color:#6b7280;")
+                            + _td(route)
+                            + _td(cur_cell)
+                            + _td(alt_cell, "color:#1d4ed8;font-weight:600;")
+                            + "</tr>"
+                        )
+                    st.markdown(f"""
+                    <div style="border:1px solid #bfdbfe;border-left:4px solid #3b82f6;
+                                border-radius:6px;padding:10px 14px;margin-bottom:10px;
+                                background:#eff6ff;">
+                      <div style="font-weight:700;color:#1d4ed8;font-size:13px;margin-bottom:8px;">
+                          🔄 {dname} ({did}) · {cnt} tasks: {task_ids}
+                      </div>
+                      <table style="width:100%;border-collapse:collapse;">
+                        <thead><tr>
+                          {_th("Task","60px")}{_th("Start","130px")}{_th("End","130px")}
+                          {_th("Route")}{_th("Current Driver (Risk)","160px")}{_th("Best Alternative","160px")}
+                        </tr></thead>
+                        <tbody>{rows_html}</tbody>
+                      </table>
+                      <div style="font-size:11px;color:#6b7280;margin-top:6px;font-style:italic;">
+                          ℹ Suggestions are computed independently. Apply one override at a time.
+                      </div>
+                    </div>""", unsafe_allow_html=True)
+
+            # ── #6: Override Assignments — proper table ───────────────────────
+            st.markdown('<div class="section-label" style="margin-top:16px;">✏️ Override Assignments</div>',
                         unsafe_allow_html=True)
-            wl_rows = []
-            for did, km in result.driver_workload().items():
-                d       = driver_db.get(did)
-                n_tasks = sum(1 for a in result.assignments
-                              if a.driver_ctx["profile"].driver_id == did)
-                wl_rows.append({
-                    "Driver":   f"{d.name} ({did})",
-                    "Cat":      d.category,
-                    "Tasks":    n_tasks,
-                    "Dist (km)":round(km, 1),
-                })
-            if wl_rows:
-                st.dataframe(pd.DataFrame(wl_rows), use_container_width=True,
-                             hide_index=True, height=min(38 + 35*len(wl_rows), 220))
+            st.caption("The initial allocation is globally optimal. "
+                       "Any override is an operational adjustment — "
+                       "risk distribution before and after will be shown on Apply.")
+
+            all_driver_opts = {d.driver_id: f"{d.name} ({d.driver_id})"
+                               for d in driver_db.all()} if hasattr(driver_db, "all") else {}
+            if not all_driver_opts:
+                all_driver_opts = {a.driver_ctx["profile"].driver_id:
+                                   f"{a.driver_ctx['profile'].name} ({a.driver_ctx['profile'].driver_id})"
+                                   for a in result.assignments}
+
+            override_selections = {}
+            # Column headers
+            _hdr_cols = st.columns([1,2,2,3,3,3,2])
+            for _ci, _ht in zip(_hdr_cols, ["Task","Start","End","Route",
+                                             "Current Driver (Risk)","Suggestion","Override to"]):
+                _ci.markdown(f'<div style="font-size:11px;font-weight:600;color:#374151;'
+                             f'background:#f1f5f9;padding:5px 2px;border-bottom:2px solid #e2e8f0;">'
+                             f'{_ht}</div>', unsafe_allow_html=True)
+
+            with st.form("override_form"):
+                th_s = ("padding:5px 8px;background:#f1f5f9;font-weight:600;font-size:11px;"
+                        "color:#374151;text-align:left;border-bottom:2px solid #e2e8f0;"
+                        "white-space:nowrap;")
+                td_s = ("padding:5px 8px;border-bottom:1px solid #f1f5f9;"
+                        "font-size:11px;vertical-align:middle;")
+                for asgn in sorted(result.assignments, key=lambda a: a.task.task_id):
+                    task    = asgn.task
+                    d       = asgn.driver_ctx["profile"]
+                    lvl     = risk_category(asgn.risk["prob"])
+                    dep_s   = ((task.departure_date.strftime("%d/%m/%Y ") if task.departure_date else "")
+                                + task.departure_time.strftime("%H:%M"))
+                    if task.end_datetime:
+                        _end_dt_ov = (task.end_datetime if isinstance(task.end_datetime, datetime)
+                                      else datetime.combine(task.departure_date or date.today(), task.end_datetime))
+                    else:
+                        _dep_dt_ov = datetime.combine(task.departure_date or date.today(), task.departure_time)
+                        _end_dt_ov = _dep_dt_ov + timedelta(
+                            hours=estimate_duration_h(asgn.route_features.dist_km))
+                    end_s   = _end_dt_ov.strftime("%d/%m/%Y %H:%M")
+                    ri      = getattr(asgn.route_features, "route_index", 0)
+                    route_s = f"{task.origin[:16]}→{task.destination[:16]}"
+                    is_rep  = driver_task_count.get(d.driver_id, 0) > 1
+                    row_bg  = "#eff6ff" if is_rep else "#ffffff"
+                    rep_icon = "🔄 " if is_rep else ""
+                    cur_html = f"<b>{d.name}</b> (R{ri+1})<br>{_badge(lvl)}"
+                    alt_d3, alt_lbl3, _, alt_ri3 = _best_alt(asgn) if is_rep else (None, None, None, None)
+                    alt_html = (f"{alt_d3.name} (R{alt_ri3+1})<br>{_badge(alt_lbl3)}"
+                                if alt_d3 else '<span style="color:#9ca3af;font-size:10px;">—</span>')
+
+                    # 7 columns: Task | Start | End | Route | Current | Suggestion | Override(dropdown)
+                    # Use [1,2,2,3,3,3,2] ratio columns
+                    c1,c2,c3,c4,c5,c6,c7 = st.columns([1,2,2,3,3,3,2])
+                    with c1:
+                        bg = "background:#eff6ff;" if is_rep else ""
+                        st.markdown(f'<div style="font-size:11px;font-weight:600;padding:8px 2px;{bg}">{rep_icon}{task.task_id}</div>', unsafe_allow_html=True)
+                    with c2:
+                        st.markdown(f'<div style="font-size:11px;padding:8px 2px;color:#374151;">{dep_s}</div>', unsafe_allow_html=True)
+                    with c3:
+                        st.markdown(f'<div style="font-size:11px;padding:8px 2px;color:#6b7280;">{end_s}</div>', unsafe_allow_html=True)
+                    with c4:
+                        st.markdown(f'<div style="font-size:11px;padding:8px 2px;">{route_s}</div>', unsafe_allow_html=True)
+                    with c5:
+                        st.markdown(f'<div style="font-size:11px;padding:8px 2px;">{cur_html}</div>', unsafe_allow_html=True)
+                    with c6:
+                        st.markdown(f'<div style="font-size:11px;padding:8px 2px;">{alt_html}</div>', unsafe_allow_html=True)
+                    with c7:
+                        sel = st.selectbox(
+                            f"ov_{task.task_id}",
+                            options=list(all_driver_opts.keys()),
+                            index=list(all_driver_opts.keys()).index(d.driver_id)
+                                  if d.driver_id in all_driver_opts else 0,
+                            format_func=lambda k: all_driver_opts[k],
+                            key=f"ov_{task.task_id}",
+                            label_visibility="collapsed",
+                        )
+                        override_selections[task.task_id] = sel
+
+                # Column headers (rendered above via st.markdown to stay fixed)
+                apply_btn = st.form_submit_button("✔  Apply Overrides", type="primary")
+
+            if apply_btn:
+                overrides = {
+                    tid: new_did
+                    for tid, new_did in override_selections.items()
+                    if new_did != next(
+                        a.driver_ctx["profile"].driver_id
+                        for a in result.assignments if a.task.task_id == tid
+                    )
+                }
+                if not overrides:
+                    st.info("No changes detected.")
+                else:
+                    from collections import Counter as _Ct
+                    before_dist = _Ct(risk_category(a.risk["prob"]) for a in result.assignments)
+                    conflict_msgs = []
+                    for asgn in result.assignments:
+                        tid = asgn.task.task_id
+                        if tid not in overrides: continue
+                        new_did = overrides[tid]
+                        new_driver = driver_db.get(new_did)
+                        if new_driver is None:
+                            conflict_msgs.append(f"{tid}: driver {new_did} not found.")
+                            continue
+                        conflict = False
+                        if asgn.task.departure_date:
+                            for other in result.assignments:
+                                if (other.driver_ctx["profile"].driver_id == new_did
+                                        and other.task.task_id != tid
+                                        and other.task.departure_date == asgn.task.departure_date):
+                                    conflict_msgs.append(
+                                        f"{tid}: {new_driver.name} already has task "
+                                        f"{other.task.task_id} on {asgn.task.departure_date} "
+                                        f"(same day). Override rejected.")
+                                    conflict = True; break
+                        if not conflict:
+                            vprofile = vehicle_db.get(asgn.task.vehicle_number)
+                            fatigue  = DriverDB.compute_fatigue(new_driver, asgn.task.departure_time)
+                            route_exp = trip_db.route_experience(
+                                new_did, asgn.task.origin, asgn.task.destination)
+                            veh_type_trips = trip_db.vehicle_type_trips(
+                                new_did, vprofile.vehicle_type, vehicle_db)
+                            total_trips = sum(
+                                trip_db.vehicle_type_experience(new_did, vehicle_db).values())
+                            new_driver_ctx = {
+                                "profile":          new_driver,
+                                "fatigue_hours":    round(fatigue, 2),
+                                "route_experience": route_exp,
+                                "veh_type_trips":   veh_type_trips,
+                                "total_trips":      total_trips,
+                            }
+                            P = compute_P(new_driver_ctx)
+                            A = compute_A(asgn.vehicle_ctx, asgn.env_ctx["weather"])
+
+                            # Pick the best route for THIS driver — not necessarily
+                            # the route the previous driver used — same as how the
+                            # solver jointly optimises driver+route per task.
+                            candidate_routes = (asgn.task.route_features
+                                                or [asgn.route_features])
+                            best_rf, best_risk = None, None
+                            for rf_c in candidate_routes:
+                                T_c    = compute_T(new_driver_ctx, asgn.task.purpose, rf_c.route_index)
+                                risk_c = compute_route_risk(
+                                    rf_c, P, T_c, A, asgn.env_ctx,
+                                    asgn.task.departure_time, DG)
+                                if best_risk is None or risk_c["prob"] < best_risk["prob"]:
+                                    best_rf, best_risk = rf_c, risk_c
+
+                            asgn.driver_ctx     = new_driver_ctx
+                            asgn.route_features = best_rf
+                            asgn.risk           = best_risk
+                            asgn.fatigue_at_dep = new_driver_ctx["fatigue_hours"]
+                    for msg in conflict_msgs:
+                        st.warning(f"⚠ {msg}")
+                    after_dist = _Ct(risk_category(a.risk["prob"]) for a in result.assignments)
+                    st.session_state["_override_dist"] = {
+                        "before": dict(before_dist), "after": dict(after_dist)}
+                    st.rerun()
+
+
 
     # ── RIGHT: selected assignment detail ────────────────────────────────────
     with right:
@@ -1573,7 +2076,8 @@ else:
                 </div>
             </div>""", unsafe_allow_html=True)
         else:
-            sel_asgn    = result.assignments[st.session_state.alloc_sel_idx]
+            _sorted_assignments = sorted(result.assignments, key=lambda a: a.task.task_id)
+            sel_asgn    = _sorted_assignments[st.session_state.alloc_sel_idx]
             driver_ctx  = sel_asgn.driver_ctx
             vehicle_ctx = sel_asgn.vehicle_ctx
             env_ctx     = sel_asgn.env_ctx
@@ -1603,89 +2107,16 @@ else:
                 dep_time_v  = dep_time_v,
             )
 
-    # ── EXPLANATION PANEL (full width, below three columns) ──────────────────
-    result = st.session_state.alloc_result
-    if result and result.assignments:
-        st.markdown("---")
-        st.markdown('<div class="panel-label">Allocation Explanation</div>',
-                    unsafe_allow_html=True)
-        st.caption("Plain-English summary of why each driver and route was selected, key risk factors, and fleet-level observations.")
-
-        # ── Fleet insights (full width) ───────────────────────────────────────
-        insights = _fleet_insight(result)
-        if insights:
-            cols = st.columns(min(len(insights), 2))
-            for i, insight in enumerate(insights):
-                with cols[i % 2]:
-                    st.markdown(
-                        f'<div style="background:var(--background-color,#f8fafc);'
-                        f'border:0.5px solid #e2e5ea;border-radius:8px;'
-                        f'padding:10px 14px;margin-bottom:8px;font-size:12px;'
-                        f'line-height:1.6;color:#374151;">{insight}</div>',
+            # ── Route Map ─────────────────────────────────────────────────────
+            st.markdown('<div class="section-label" style="margin-top:12px;">Route Map</div>',
                         unsafe_allow_html=True)
-
-        st.markdown('<div class="section-label" style="margin-top:12px;">Per-Task Justification</div>',
-                    unsafe_allow_html=True)
-
-        # ── Per-task justification cards ──────────────────────────────────────
-        sev_color = {"high": "#fef2f2", "medium": "#fffbeb", "low": "#f0fdf4"}
-        sev_border= {"high": "#fca5a5", "medium": "#fcd34d", "low": "#86efac"}
-        sev_text  = {"high": "#991b1b", "medium": "#92400e", "low": "#166534"}
-
-        n_cols = min(len(result.assignments), 3)
-        cols   = st.columns(n_cols)
-
-        for i, asgn in enumerate(result.assignments):
-            with cols[i % n_cols]:
-                task    = asgn.task
-                d       = asgn.driver_ctx["profile"]
-                prob    = asgn.risk["prob"]
-                lvl     = risk_category(prob)
-                lvl_col = {"Low": "#16a34a", "Medium": "#d97706", "High": "#dc2626"}[lvl]
-                lvl_bg  = {"Low": "#f0fdf4", "Medium": "#fffbeb", "High": "#fef2f2"}[lvl]
-
-                driver_reason = _driver_selection_reason(asgn, result.assignments,
-                                                          getattr(result, "score_matrix", None))
-                route_reason  = _route_selection_reason(asgn)
-                flags         = _risk_flags(asgn)
-
-                # Risk flag pills HTML
-                flag_html = ""
-                for sev, msg in flags:
-                    flag_html += (
-                        f'<div style="background:{sev_color[sev]};'
-                        f'border:0.5px solid {sev_border[sev]};'
-                        f'border-radius:6px;padding:4px 8px;margin-bottom:4px;'
-                        f'font-size:11px;color:{sev_text[sev]};line-height:1.5;">'
-                        f'{msg}</div>')
-
-                if not flag_html:
-                    flag_html = ('<div style="font-size:11px;color:#6b7280;">'
-                                 '✅ No significant risk flags.</div>')
-
-                st.markdown(f"""
-                <div style="border:1px solid {lvl_col}33;border-radius:10px;
-                            padding:14px;margin-bottom:10px;background:{lvl_bg};">
-                    <div style="display:flex;justify-content:space-between;
-                                align-items:center;margin-bottom:8px;">
-                        <span style="font-size:13px;font-weight:600;color:#111827;">
-                            {task.task_id} · {d.name}
-                        </span>
-                        <span style="font-size:12px;font-weight:500;
-                                     color:{lvl_col};">{lvl}</span>
-                    </div>
-                    <div style="font-size:11px;color:#6b7280;margin-bottom:8px;">
-                        {task.origin[:30]} → {task.destination[:30]}<br>
-                        {task.departure_time.strftime("%H:%M")} · {task.purpose}
-                        · {task.vehicle_number}
-                    </div>
-                    <div style="font-size:12px;color:#374151;margin-bottom:6px;">
-                        <b>Driver:</b> {driver_reason}
-                    </div>
-                    <div style="font-size:12px;color:#374151;margin-bottom:8px;">
-                        <b>Route:</b> {route_reason}
-                    </div>
-                    <div style="font-size:11px;font-weight:500;color:#6b7280;
-                                margin-bottom:4px;">Risk factors:</div>
-                    {flag_html}
-                </div>""", unsafe_allow_html=True)
+            map_result_dict = {
+                "route_features": rf,
+                "driver_ctx":     driver_ctx_display,
+                "vehicle_ctx":    vehicle_ctx,
+                "env_ctx":        env_ctx,
+                "purpose":        purpose_v,
+                "dep_time":       dep_time_v,
+            }
+            m = render_map(G, map_result_dict, sel_asgn.risk)
+            st_folium(m, width=None, height=350, use_container_width=True, returned_objects=[])

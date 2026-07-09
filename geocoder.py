@@ -26,7 +26,7 @@ import streamlit as st
 from functools import lru_cache
 
 _SEARCH_URL = "https://www.onemap.gov.sg/api/common/elastic/search"
-_TIMEOUT    = 8
+_TIMEOUT    = 10
 
 
 # ── Core geocode ──────────────────────────────────────────────────────────────

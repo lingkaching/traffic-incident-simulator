@@ -36,7 +36,9 @@ Hard (block assignment):
   - Driver not licensed for vehicle type            (eligibility)
   - Driver unavailable (on leave)                   (available flag)
   - Time overlap with an already-committed task      (schedule)
-  - Shift would exceed driver's max_shift_hours      (fatigue cap)
+  - Single task duration > 8 h                        (informational)
+Hard (block assignment):
+  - Task starts before driver shift_start_time        (per-day shift window)
 
 Soft (penalised via chained fatigue, not blocked):
   - Back-to-back tasks with < BUFFER_MIN gap         (fatigue carries forward)
@@ -197,8 +199,10 @@ def _default_compute_route_risk(route_features: RouteFeatures,
 class Task:
     """
     One unit of work to be allocated.
-    route_sequences: up to 3 node-id lists from OSMnx pathfinding.
-    route_features:  populated by the allocator after build_task_context.
+    route_sequences:  up to 3 node-id lists from OSMnx pathfinding.
+    route_features:   populated by the allocator after build_task_context.
+    departure_date:   calendar date of departure (for cross-day scheduling).
+    end_datetime:     actual end datetime (if known); otherwise estimated from route.
     """
     task_id:         str
     origin:          str
@@ -207,104 +211,118 @@ class Task:
     purpose:         str
     vehicle_number:  str
     route_sequences: list[list[int]]       # up to 3 OSMnx paths
-    route_features:  list[RouteFeatures] = field(default_factory=list)
+    route_features:  list[RouteFeatures]   = field(default_factory=list)
+    departure_date:  Optional[date]        = None   # calendar date
+    end_datetime:    Optional[datetime]    = None   # actual end if known
 
 
 @dataclass
 class TimeBlock:
-    """A committed time window for one driver."""
-    start:   time
-    end:     time
+    """A committed time window for one driver (absolute datetimes)."""
+    start:   datetime
+    end:     datetime
     task_id: str
+
+
+def _to_datetime(val) -> Optional[datetime]:
+    """Safely convert a value to datetime, returning None for NaN/None/non-datetime."""
+    if val is None:
+        return None
+    try:
+        import numpy as np
+        if isinstance(val, float) or isinstance(val, np.floating):
+            return None  # NaN from pandas
+    except ImportError:
+        pass
+    if isinstance(val, datetime):
+        return val
+    try:
+        import pandas as pd
+        ts = pd.Timestamp(val)
+        return ts.to_pydatetime() if not pd.isnull(ts) else None
+    except Exception:
+        return None
 
 
 @dataclass
 class DriverSchedule:
     """
     Tracks a driver's committed time blocks as the solver assigns tasks.
-    Accumulated driving km is tracked separately for fatigue carry-forward.
+
+    Constraints (both independent — either alone blocks an assignment):
+    1. Time buffer: new task window must not overlap [blk.start, blk.end + BUFFER_H].
+       Buffer also applies before: blk.start - BUFFER_H must be > new task end.
+       Formally: dep < blk.end + BUFFER_H  AND  end + BUFFER_H > blk.start
+    2. One-task-per-day: new task's calendar day range must not overlap existing.
     """
-    driver_id:       str
-    shift_start:     time
-    max_shift_hours: float
-    blocks:          list[TimeBlock] = field(default_factory=list)
-    driving_km:      float           = 0.0   # sum of distances of committed tasks
+    driver_id:          str
+    shift_start_time:   Optional[time]     = None   # per-driver shift start
+    blocks:             list[TimeBlock]    = field(default_factory=list)
+    driving_km:         float              = 0.0
 
-    # ── Time arithmetic helpers ───────────────────────────────────────────────
+    BUFFER_H: float = field(default=4.0, init=False, repr=False)
 
-    @staticmethod
-    def _to_dt(t: time) -> datetime:
-        return datetime.combine(date.today(), t)
+    def _dep_dt(self, dep_time: time, dep_date: Optional[date]) -> datetime:
+        d = dep_date or date.today()
+        return datetime.combine(d, dep_time)
 
-    @staticmethod
-    def _add_h(t: time, hours: float) -> time:
-        dt = DriverSchedule._to_dt(t) + timedelta(hours=hours)
-        return dt.time()
-
-    @staticmethod
-    def _hours_between(a: time, b: time) -> float:
-        return (DriverSchedule._to_dt(b) - DriverSchedule._to_dt(a)).total_seconds() / 3600
-
-    @staticmethod
-    def _overlaps(s1: time, e1: time, s2: time, e2: time) -> bool:
-        """True if [s1,e1) and [s2,e2) overlap (treating time as same-day)."""
-        dt_s1, dt_e1 = DriverSchedule._to_dt(s1), DriverSchedule._to_dt(e1)
-        dt_s2, dt_e2 = DriverSchedule._to_dt(s2), DriverSchedule._to_dt(e2)
-        return dt_s1 < dt_e2 and dt_s2 < dt_e1
-
-    # ── Public API ────────────────────────────────────────────────────────────
-
-    def is_available(self, dep_time: time, duration_h: float,
-                     buffer_h: float = 0.5) -> tuple[bool, str]:
+    def is_available(self, dep_time: time, end_dt: datetime,
+                     dep_date: Optional[date] = None) -> tuple[bool, str]:
         """
-        Check whether the driver can take a task departing at dep_time
-        for duration_h hours.
-
-        Returns (ok: bool, reason: str).  reason is empty string when ok.
-
-        buffer_h: minimum gap required after each committed task (default 30 min).
+        Three independent hard constraints — any alone blocks assignment:
+        1. Shift start: task must not start before driver's shift_start_time that day.
+        2. Time buffer: conflict if new [dep_dt, end_dt] overlaps [blk.start - BUF, blk.end + BUF]
+        3. One-task-per-day: calendar dates must not overlap.
         """
-        end_time = self._add_h(dep_time, duration_h)
+        dep_dt  = self._dep_dt(dep_time, dep_date)
+        buf     = timedelta(hours=self.BUFFER_H)
+        new_start_day = dep_dt.date()
+        new_end_day   = end_dt.date()
 
-        # 1. Must be within shift window
-        if self._to_dt(dep_time) < self._to_dt(self.shift_start):
-            return False, f"departs before shift start ({self.shift_start})"
+        # Constraint 1: shift start window
+        if self.shift_start_time is not None:
+            shift_dt = datetime.combine(dep_dt.date(), self.shift_start_time)
+            if dep_dt < shift_dt:
+                return False, (f"departs before shift start "
+                               f"({self.shift_start_time.strftime('%H:%M')})")
 
-        shift_end_h = self._hours_between(self.shift_start, end_time)
-        if shift_end_h > self.max_shift_hours:
-            return False, (f"would exceed max shift "
-                           f"({shift_end_h:.1f}h > {self.max_shift_hours}h)")
-
-        # 2. No overlap with existing committed tasks (+ buffer around each)
         for blk in self.blocks:
-            # Expand the existing block by buffer on both sides
-            blk_start_buf = self._add_h(blk.start, -buffer_h)
-            blk_end_buf   = self._add_h(blk.end,    buffer_h)
-            if self._overlaps(dep_time, end_time, blk_start_buf, blk_end_buf):
-                return False, (f"overlaps with task {blk.task_id} "
-                               f"({blk.start}–{blk.end})")
+            # Time buffer check
+            if dep_dt < blk.end + buf and end_dt + buf > blk.start:
+                return False, (f"time conflict with task {blk.task_id} "
+                               f"({blk.start.strftime('%d/%m %H:%M')}–"
+                               f"{blk.end.strftime('%d/%m %H:%M')})")
+            # One-task-per-day
+            blk_start_day = blk.start.date()
+            blk_end_day   = blk.end.date()
+            if new_start_day <= blk_end_day and new_end_day >= blk_start_day:
+                return False, f"same calendar day as task {blk.task_id}"
 
         return True, ""
 
-    def commit(self, dep_time: time, duration_h: float,
-               task_id: str, dist_km: float):
+    def commit(self, dep_time: time, end_dt: datetime,
+               task_id: str, dist_km: float,
+               dep_date: Optional[date] = None):
         """Record a confirmed assignment."""
-        end_time = self._add_h(dep_time, duration_h)
-        self.blocks.append(TimeBlock(start=dep_time, end=end_time, task_id=task_id))
+        dep_dt = self._dep_dt(dep_time, dep_date)
+        self.blocks.append(TimeBlock(start=dep_dt, end=end_dt, task_id=task_id))
         self.driving_km += dist_km
-        # Keep blocks sorted by start time for clarity
-        self.blocks.sort(key=lambda b: self._to_dt(b.start))
+        self.blocks.sort(key=lambda b: b.start)
 
     def rollback(self, task_id: str):
-        """Remove a previously committed task (used during local swap)."""
+        """Remove a previously committed task."""
         self.blocks = [b for b in self.blocks if b.task_id != task_id]
-        # driving_km is approximate after rollback — recalculate if needed
 
     @property
     def total_driving_h(self) -> float:
-        return sum(
-            self._hours_between(b.start, b.end) for b in self.blocks
-        )
+        """Total driving hours across all assigned tasks (cross-day sum)."""
+        return sum((b.end - b.start).total_seconds() / 3600 for b in self.blocks)
+
+    def max_single_task_h(self) -> float:
+        """Longest single task duration — more meaningful than cross-day total."""
+        if not self.blocks:
+            return 0.0
+        return max((b.end - b.start).total_seconds() / 3600 for b in self.blocks)
 
 
 @dataclass
@@ -324,7 +342,7 @@ class AllocationResult:
     """Full output of one allocation run."""
     assignments:    list[Assignment]
     unassigned:     list[Task]
-    objective:      float
+    objective:      tuple   # (max_prob, n_high, n_medium, n_low)
     total_lambda:   float
     warnings:       list[str]
     score_matrix:   dict = field(default_factory=dict)  # full (task,driver,route)→risk
@@ -472,8 +490,13 @@ def greedy_assign(
                 risk = score_matrix.get(key)
                 if risk is None:
                     continue
-                ok, _ = sched.is_available(task.departure_time,
-                                            estimate_duration_h(rf.dist_km))
+                dur_h  = estimate_duration_h(rf.dist_km)
+                end_dt = (_to_datetime(task.end_datetime) if _to_datetime(task.end_datetime) is not None
+                          else datetime.combine(task.departure_date or date.today(),
+                                                task.departure_time)
+                          + timedelta(hours=dur_h))
+                ok, _ = sched.is_available(task.departure_time, end_dt,
+                                           dep_date=task.departure_date)
                 if ok:
                     best = min(best, risk["total_lambda"])
         return best
@@ -505,8 +528,13 @@ def greedy_assign(
                 risk = score_matrix.get(key)
                 if risk is None:
                     continue
-                ok, _ = schedules[did].is_available(task.departure_time,
-                                                     estimate_duration_h(rf.dist_km))
+                _edx = _to_datetime(task.end_datetime)
+                _dur  = estimate_duration_h(rf.dist_km)
+                _edt  = (_edx if _edx is not None else
+                         datetime.combine(task.departure_date or date.today(),
+                                          task.departure_time) + timedelta(hours=_dur))
+                ok, _ = schedules[did].is_available(task.departure_time, _edt,
+                                                     dep_date=task.departure_date)
                 if ok:
                     options.append((did, rf.route_index, rf, risk["total_lambda"]))
 
@@ -520,32 +548,48 @@ def greedy_assign(
 
         for did, ridx, rf, this_lambda in options:
             # Tentatively commit this option
-            dur = estimate_duration_h(rf.dist_km)
-            schedules[did].commit(task.departure_time, dur, task.task_id, rf.dist_km)
+            dur    = estimate_duration_h(rf.dist_km)
+            end_dt = (_to_datetime(task.end_datetime) if _to_datetime(task.end_datetime) is not None
+                      else datetime.combine(task.departure_date or date.today(),
+                                            task.departure_time)
+                      + timedelta(hours=dur))
+            schedules[did].commit(task.departure_time, end_dt,
+                                  task.task_id, rf.dist_km,
+                                  dep_date=task.departure_date)
 
-            # Worst case across remaining unassigned tasks (best each can achieve)
             worst_remaining = max(
                 (_best_available_lambda(r_idx, schedules) for r_idx in remaining),
                 default=0.0,
             )
-
-            # The fleet objective if we take this option
             lookahead_score = max(this_lambda, worst_remaining)
-
-            # Roll back tentative commit
             schedules[did].rollback(task.task_id)
 
             if lookahead_score < best_score:
                 best_score  = lookahead_score
                 best_option = (did, ridx, rf)
 
-        best_did, best_ridx, best_rf = best_option
+        if best_option is None:
+            # Every candidate tied (most commonly: all of them are equally
+            # "infinite" lookahead risk, e.g. because picking any of them
+            # would leave some other remaining task with zero drivers left).
+            # Lookahead is uninformative in that case — fall back to the
+            # option with the lowest immediate risk for THIS task instead of
+            # crashing on an unresolved comparison.
+            best_did, best_ridx, best_rf, _ = min(options, key=lambda o: o[3])
+        else:
+            best_did, best_ridx, best_rf = best_option
         assignments[task_idx] = (best_did, best_ridx)
+        best_dur   = estimate_duration_h(best_rf.dist_km)
+        best_end_dt = (_to_datetime(task.end_datetime) if _to_datetime(task.end_datetime) is not None
+                       else datetime.combine(task.departure_date or date.today(),
+                                             task.departure_time)
+                       + timedelta(hours=best_dur))
         schedules[best_did].commit(
-            dep_time   = task.departure_time,
-            duration_h = estimate_duration_h(best_rf.dist_km),
-            task_id    = task.task_id,
-            dist_km    = best_rf.dist_km,
+            dep_time = task.departure_time,
+            end_dt   = best_end_dt,
+            task_id  = task.task_id,
+            dist_km  = best_rf.dist_km,
+            dep_date = task.departure_date,
         )
 
     return assignments, schedules
@@ -574,18 +618,29 @@ def local_swap(
     Accept any swap that reduces max(total_lambda) across all assignments.
     Repeat until no improvement or max_iters reached.
     """
-    def _objective(asgns: list[Optional[tuple[str, int]]]) -> float:
-        """Max total_lambda across all assigned tasks."""
-        vals = []
+    def _risk_lbl(prob: float) -> str:
+        # Must match the module-level _risk_category() thresholds exactly —
+        # a stale local copy here previously used placeholder 0.33/0.66
+        # thresholds, which silently made almost every task read as "Low"
+        # and made the n_high/n_medium/n_low part of the objective inert.
+        return _risk_category(prob)
+
+    def _objective(asgns: list[Optional[tuple[str, int]]]) -> tuple:
+        """Lexicographic: (max_prob, n_high, n_medium, n_low)."""
+        probs = []
         for i, asgn in enumerate(asgns):
-            if asgn is None:
-                continue
+            if asgn is None: continue
             did, ridx = asgn
-            key = (tasks[i].task_id, did, ridx)
-            risk = score_matrix.get(key)
+            risk = score_matrix.get((tasks[i].task_id, did, ridx))
             if risk:
-                vals.append(risk["total_lambda"])
-        return max(vals) if vals else 0.0
+                probs.append(risk["prob"])
+        if not probs:
+            return (0.0, 0, 0, 0)
+        labels = [_risk_lbl(p) for p in probs]
+        return (max(probs),
+                sum(1 for l in labels if l == "High"),
+                sum(1 for l in labels if l == "Medium"),
+                sum(1 for l in labels if l == "Low"))
 
     improved = True
     iters    = 0
@@ -618,6 +673,56 @@ def local_swap(
                 else:
                     assignments[i] = old_asgn
 
+            # ── Try giving task_i to a currently-idle (unused) driver ──────────
+            used_drivers = {a[0] for a in assignments if a is not None}
+            did_i, ridx_i = assignments[i]   # refresh in case route-swap above changed it
+
+            for driver_ctx in task_ctxs[i]["drivers"]:
+                cand_did = driver_ctx["profile"].driver_id
+                if cand_did == did_i or cand_did in used_drivers:
+                    continue   # only consider truly idle drivers here
+
+                # Find this candidate's best available route for task_i
+                best_rf, best_lambda = None, float("inf")
+                for rf in task_ctxs[i]["routes"]:
+                    key = (task_i.task_id, cand_did, rf.route_index)
+                    risk = score_matrix.get(key)
+                    if risk is None:
+                        continue
+                    dur = estimate_duration_h(rf.dist_km)
+                    end_dt = (_to_datetime(task_i.end_datetime) if _to_datetime(task_i.end_datetime) is not None
+                              else datetime.combine(task_i.departure_date or date.today(),
+                                                    task_i.departure_time)
+                              + timedelta(hours=dur))
+                    ok, _ = schedules[cand_did].is_available(task_i.departure_time, end_dt,
+                                                             dep_date=task_i.departure_date)
+                    if ok and risk["total_lambda"] < best_lambda:
+                        best_rf, best_lambda = rf, risk["total_lambda"]
+
+                if best_rf is None:
+                    continue   # candidate not schedulable for this task on any route
+
+                old_asgn = assignments[i]
+                assignments[i] = (cand_did, best_rf.route_index)
+                if _objective(assignments) < current_obj:
+                    # Accept: move task_i's schedule slot from did_i to cand_did
+                    schedules[did_i].rollback(task_i.task_id)
+                    dur = estimate_duration_h(best_rf.dist_km)
+                    end_dt = (_to_datetime(task_i.end_datetime) if _to_datetime(task_i.end_datetime) is not None
+                              else datetime.combine(task_i.departure_date or date.today(),
+                                                    task_i.departure_time)
+                              + timedelta(hours=dur))
+                    schedules[cand_did].commit(task_i.departure_time, end_dt,
+                                               task_i.task_id, best_rf.dist_km,
+                                               dep_date=task_i.departure_date)
+                    current_obj = _objective(assignments)
+                    improved = True
+                    used_drivers.discard(did_i)
+                    used_drivers.add(cand_did)
+                    did_i, ridx_i = assignments[i]
+                else:
+                    assignments[i] = old_asgn
+
             # ── Try swapping drivers between task_i and task_j ────────────────
             for j in assigned_indices:
                 if j <= i:
@@ -645,8 +750,18 @@ def local_swap(
                 sched_i.rollback(task_i.task_id)
                 sched_j.rollback(task_j.task_id)
 
-                ok_ij, _ = sched_j.is_available(task_i.departure_time, dur_i)
-                ok_ji, _ = sched_i.is_available(task_j.departure_time, dur_j)
+                end_dt_i = (_to_datetime(task_i.end_datetime) if _to_datetime(task_i.end_datetime) is not None
+                            else datetime.combine(task_i.departure_date or date.today(),
+                                                  task_i.departure_time)
+                            + timedelta(hours=dur_i))
+                end_dt_j = (_to_datetime(task_j.end_datetime) if _to_datetime(task_j.end_datetime) is not None
+                            else datetime.combine(task_j.departure_date or date.today(),
+                                                  task_j.departure_time)
+                            + timedelta(hours=dur_j))
+                ok_ij, _ = sched_j.is_available(task_i.departure_time, end_dt_i,
+                                                 dep_date=task_i.departure_date)
+                ok_ji, _ = sched_i.is_available(task_j.departure_time, end_dt_j,
+                                                 dep_date=task_j.departure_date)
 
                 if ok_ij and ok_ji:
                     old_i, old_j = assignments[i], assignments[j]
@@ -657,25 +772,34 @@ def local_swap(
                         # Accept swap — commit new schedule
                         rf_i = next(r for r in task_ctxs[i]["routes"] if r.route_index == ridx_i)
                         rf_j = next(r for r in task_ctxs[j]["routes"] if r.route_index == ridx_j)
-                        sched_j.commit(task_i.departure_time, dur_i, task_i.task_id, rf_i.dist_km)
-                        sched_i.commit(task_j.departure_time, dur_j, task_j.task_id, rf_j.dist_km)
+                        sched_j.commit(task_i.departure_time, end_dt_i,
+                                       task_i.task_id, rf_i.dist_km,
+                                       dep_date=task_i.departure_date)
+                        sched_i.commit(task_j.departure_time, end_dt_j,
+                                       task_j.task_id, rf_j.dist_km,
+                                       dep_date=task_j.departure_date)
                         current_obj = _objective(assignments)
                         improved = True
                     else:
-                        # Reject swap — restore original assignments and schedules
                         assignments[i] = old_i
                         assignments[j] = old_j
-                        # Re-commit original
                         rf_i = next(r for r in task_ctxs[i]["routes"] if r.route_index == ridx_i)
                         rf_j = next(r for r in task_ctxs[j]["routes"] if r.route_index == ridx_j)
-                        sched_i.commit(task_i.departure_time, dur_i, task_i.task_id, rf_i.dist_km)
-                        sched_j.commit(task_j.departure_time, dur_j, task_j.task_id, rf_j.dist_km)
+                        sched_i.commit(task_i.departure_time, end_dt_i,
+                                       task_i.task_id, rf_i.dist_km,
+                                       dep_date=task_i.departure_date)
+                        sched_j.commit(task_j.departure_time, end_dt_j,
+                                       task_j.task_id, rf_j.dist_km,
+                                       dep_date=task_j.departure_date)
                 else:
-                    # Swap not feasible — restore schedules
                     rf_i = next(r for r in task_ctxs[i]["routes"] if r.route_index == ridx_i)
                     rf_j = next(r for r in task_ctxs[j]["routes"] if r.route_index == ridx_j)
-                    sched_i.commit(task_i.departure_time, dur_i, task_i.task_id, rf_i.dist_km)
-                    sched_j.commit(task_j.departure_time, dur_j, task_j.task_id, rf_j.dist_km)
+                    sched_i.commit(task_i.departure_time, end_dt_i,
+                                   task_i.task_id, rf_i.dist_km,
+                                   dep_date=task_i.departure_date)
+                    sched_j.commit(task_j.departure_time, end_dt_j,
+                                   task_j.task_id, rf_j.dist_km,
+                                   dep_date=task_j.departure_date)
 
     return assignments, schedules
 
@@ -698,20 +822,23 @@ def _build_fatigue_overrides(
     Only entries that differ from base fatigue are included.
     """
     # Group assignments by driver, sorted by departure time
-    driver_tasks: dict[str, list[tuple[time, int]]] = {}  # did → [(dep_time, task_idx)]
+    # Group assignments by driver AND calendar day — fatigue only carries within a day
+    driver_day_tasks: dict[tuple, list[tuple]] = {}  # (did, date) → [(dep_time, task_idx)]
     for task_idx, asgn in enumerate(assignments):
         if asgn is None:
             continue
         did, _ = asgn
-        driver_tasks.setdefault(did, []).append(
+        task_date = tasks[task_idx].departure_date or date.today()
+        key = (did, task_date)
+        driver_day_tasks.setdefault(key, []).append(
             (tasks[task_idx].departure_time, task_idx))
 
-    overrides: dict[str, dict[str, float]] = {}  # task_id → {driver_id: fatigue}
+    overrides: dict[str, dict[str, float]] = {}
 
-    for did, task_list in driver_tasks.items():
+    for (did, task_date), task_list in driver_day_tasks.items():
         if len(task_list) < 2:
-            continue  # single task — no carry-forward needed
-        task_list.sort(key=lambda x: datetime.combine(date.today(), x[0]))
+            continue  # only one task this day — no carry-forward
+        task_list.sort(key=lambda x: x[0])
         driver = driver_db.get(did)
         cumulative_km = 0.0
 
@@ -719,10 +846,9 @@ def _build_fatigue_overrides(
             if cumulative_km > 0:
                 fat = fatigue_carry_forward(driver, dep_time, cumulative_km)
                 overrides.setdefault(tasks[task_idx].task_id, {})[did] = fat
-            # Add this task's distance to cumulative for subsequent tasks
-            ridx       = assignments[task_idx][1]
-            rf         = next(r for r in task_ctxs[task_idx]["routes"]
-                              if r.route_index == ridx)
+            ridx = assignments[task_idx][1]
+            rf   = next(r for r in task_ctxs[task_idx]["routes"]
+                        if r.route_index == ridx)
             cumulative_km += rf.dist_km
 
     return overrides
@@ -832,12 +958,12 @@ class Allocator:
             for d_ctx in ctx["drivers"]
         }
         for did in all_driver_ids:
-            driver = self.driver_db.get(did)
-            if driver:
+            _drv = self.driver_db.get(did)
+            if _drv:
                 schedules[did] = DriverSchedule(
-                    driver_id       = did,
-                    shift_start     = driver.shift_start_time,
-                    max_shift_hours = driver.max_shift_hours,
+                    driver_id        = did,
+                    shift_start_time = _drv.shift_start_time
+                                       if hasattr(_drv, "shift_start_time") else None,
                 )
 
         # ── 4. Greedy assignment ──────────────────────────────────────────────
@@ -845,26 +971,32 @@ class Allocator:
         raw_assignments, schedules = greedy_assign(
             tasks, task_ctxs, score_matrix, schedules)
 
-        # ── 5. Local swap improvement ─────────────────────────────────────────
+        # ── 5. Local swap improvement, iterated with chained-fatigue recompute ──
+        # local_swap only optimises against whatever is currently in score_matrix.
+        # A driver's chained (multi-task-same-day) fatigue isn't known until AFTER
+        # assignments are picked, so we alternate: swap → recompute chained fatigue
+        # for whoever ended up with multiple tasks → refresh their risk in
+        # score_matrix → swap again. This lets the optimizer react if a driver's
+        # true (chained) risk turns out worse than an idle alternative's, instead
+        # of only ever seeing that driver's optimistic first-task-of-the-day risk.
         _progress("Optimising with local swaps…", 0.70)
-        raw_assignments, schedules = local_swap(
-            tasks, task_ctxs, raw_assignments, score_matrix, schedules)
+        fatigue_overrides_by_task: dict[str, dict[str, float]] = {}
 
-        # ── 6. Fatigue carry-forward recomputation ────────────────────────────
-        _progress("Recomputing chained fatigue…", 0.85)
-        fatigue_overrides_by_task = _build_fatigue_overrides(
-            raw_assignments, tasks, task_ctxs, self.driver_db)
+        for _fatigue_iter in range(5):
+            raw_assignments, schedules = local_swap(
+                tasks, task_ctxs, raw_assignments, score_matrix, schedules)
 
-        # For tasks with chained drivers, rebuild their score and replace
-        for task_idx, asgn in enumerate(raw_assignments):
-            if asgn is None:
-                continue
-            did, ridx = asgn
-            task_id = tasks[task_idx].task_id
-            if task_id in fatigue_overrides_by_task:
-                override = fatigue_overrides_by_task[task_id]
+            fatigue_overrides_by_task = _build_fatigue_overrides(
+                raw_assignments, tasks, task_ctxs, self.driver_db)
+
+            changed = False
+            for task_idx, asgn in enumerate(raw_assignments):
+                if asgn is None:
+                    continue
+                did, ridx = asgn
+                task_id = tasks[task_idx].task_id
+                override = fatigue_overrides_by_task.get(task_id, {})
                 if did in override:
-                    # Recompute risk with updated fatigue
                     ctx   = task_ctxs[task_idx]
                     d_ctx = next(d for d in ctx["drivers"]
                                  if d["profile"].driver_id == did)
@@ -877,9 +1009,17 @@ class Allocator:
                     new_risk = self._compute_R(
                         rf, P, T, A, ctx["environment"],
                         tasks[task_idx].departure_time, self.DG)
-                    score_matrix[(task_id, did, ridx)] = new_risk
+                    key = (task_id, did, ridx)
+                    if score_matrix.get(key) != new_risk:
+                        changed = True
+                    score_matrix[key] = new_risk
 
-        # ── 7. Assemble final Assignment objects ──────────────────────────────
+            if not changed:
+                break
+
+        # ── 6. (fatigue overrides already folded into score_matrix above) ──────
+
+
         _progress("Assembling results…", 0.95)
         assignments:  list[Assignment] = []
         unassigned:   list[Task]       = []
@@ -919,18 +1059,24 @@ class Allocator:
         warnings: list[str] = []
 
         for did, sched in schedules.items():
-            if sched.total_driving_h > 6.0:
+            max_h = sched.max_single_task_h()
+            if max_h > 8.0:
                 driver = self.driver_db.get(did)
                 warnings.append(
-                    f"{driver.name} ({did}): cumulative driving "
-                    f"{sched.total_driving_h:.1f} h exceeds 6 h threshold.")
+                    f"{driver.name} ({did}): one task exceeds 8 h duration "
+                    f"({max_h:.1f} h) — informational only.")
 
         for task in unassigned:
             warnings.append(
                 f"Task {task.task_id} ({task.origin} → {task.destination}) "
                 f"could not be assigned — no available driver without conflict.")
 
-        objective     = max((a.risk["prob"] for a in assignments), default=0.0)
+        probs  = [a.risk["prob"] for a in assignments]
+        labels = [_risk_category(p) for p in probs]
+        objective = (max(probs) if probs else 0.0,
+                     sum(1 for l in labels if l == "High"),
+                     sum(1 for l in labels if l == "Medium"),
+                     sum(1 for l in labels if l == "Low"))
         total_lambda  = sum(a.risk["total_lambda"] for a in assignments)
 
         _progress("Done.", 1.0)
