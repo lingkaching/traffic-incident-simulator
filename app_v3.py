@@ -29,7 +29,7 @@ from data_layer_v2 import (
     VEHICLE_ELIGIBILITY, ROAD_CLASS_LABELS, estimate_duration_h,
 )
 # ── geocoder ──────────────────────────────────────────────────────────────────
-from geocoder import geocode as onemap_geocode, geocode_input, get_cache, geocode_with_candidates
+from geocoder_v3 import geocode as onemap_geocode, geocode_input, get_cache, geocode_with_candidates
 
 # ── Location alias map ────────────────────────────────────────────────────────
 # Add entries here when OneMap cannot find a location name from your task file.
