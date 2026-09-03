@@ -632,19 +632,20 @@ _DEMO_ORIGIN      = "Seletar Camp"
 _DEMO_DESTINATION = "Nee Soon Camp"
 _DEMO_PRESETS = [
     # (vehicle_number, purpose,     dep_hour)
-    # An 8-step mild -> severe ladder across vehicle type/condition, purpose,
-    # and weather (hour is deterministic weather for this data seed — see
-    # notes above). Conditions were checked directly against the seeded
-    # maintenance records rather than assumed; comments note the actual
-    # computed condition, not a guess.
-    ("SG2001E",         "Admin",      13),  # Light Truck, Fair, Clear   — mildest
-    ("SG2004H",         "Training",   13),  # Light Truck, Fair, Clear
-    ("SG3004L",         "Operation",  16),  # 5T, Fair, Rain
-    ("SG4001O",         "Operation",   9),  # 10T, Fair, Heavy Rain
+    # Client requirement: demo scenario must use a 5T vehicle specifically.
+    # All 6 presets below are 5T plates from the fleet — the ladder still
+    # runs mild -> severe, but now varies purpose/weather/condition-pairing
+    # within the 5T category only, instead of stepping up through vehicle
+    # types. Conditions checked directly against seeded maintenance records:
+    # SG3006N/SG3004L/SG3001I/SG3002J = Fair, SG3005M/SG3003K = Poor.
+    ("SG3006N",         "Admin",      13),  # 5T, Fair, Clear         — mildest
+    ("SG3004L",         "Training",   13),  # 5T, Fair, Clear
+    ("SG3001I",         "Operation",  16),  # 5T, Fair, Rain
+    ("SG3002J",         "Operation",   9),  # 5T, Fair, Heavy Rain
     ("SG3005M",         "Operation",  16),  # 5T, Poor, Rain
     ("SG3003K",         "Emergency",  19),  # 5T, Poor, Heavy Rain
-    ("SG4002P",         "Emergency",   9),  # 10T, Poor, Heavy Rain
-    ("SG4003Q",         "Emergency",  21),  # 10T, Poor, Heavy Rain + night — most severe
+    ("SG3005M",         "Emergency",   9),  # 5T, Poor, Heavy Rain
+    ("SG3003K",         "Emergency",  21),  # 5T, Poor, Heavy Rain + night — most severe
 ]
 
 def find_demo_scenario(DG, driver_db, vehicle_db, trip_db, env_sim) -> Optional[dict]:
