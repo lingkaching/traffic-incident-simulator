@@ -741,7 +741,7 @@ def render_map(G_raw, result: dict, risk: dict,
     all_lats = [G_raw.nodes[n]["y"] for seq in all_seqs for n in seq]
     all_lons = [G_raw.nodes[n]["x"] for seq in all_seqs for n in seq]
 
-    m = folium.Map(tiles="CartoDB positron")
+    m = folium.Map(tiles="OpenStreetMap")
     m.fit_bounds([[min(all_lats), min(all_lons)], [max(all_lats), max(all_lons)]],
                 padding=(24, 24))
 
