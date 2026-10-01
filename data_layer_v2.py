@@ -135,40 +135,40 @@ class DriverDB:
 
     # (name, id, cat, mileage, crash, shift_start, max_shift_h, available)
     _SEED = [
-        # ── Cat D — 8 drivers (all vehicle types incl. 10T) ──────────────────
-        ("Rahman",       "D001", "D", ">300k",      False, time(6,  0), 12.0, True ),
-        ("Ng",           "D002", "D", ">300k",      False, time(5, 30), 12.0, True ),
-        ("Chua",         "D003", "D", "100k-300k",  False, time(5,  0), 12.0, True ),
-        ("Iskandar",     "D004", "D", ">300k",      False, time(6, 30), 12.0, True ),
-        ("Subramaniam",  "D005", "D", "100k-300k",  True,  time(7,  0), 10.0, True ),
-        ("Faizal",       "D006", "D", ">300k",      False, time(6,  0), 12.0, True ),
-        ("Zheng",        "D007", "D", "100k-300k",  False, time(5, 30), 12.0, True ),
-        ("Balachandran", "D008", "D", ">300k",      False, time(7, 30), 12.0, True ),
-        # ── Cat C — 10 drivers (up to 5T) ────────────────────────────────────
-        ("Lim",          "D009", "C", "100k-300k",  False, time(7,  0), 12.0, True ),
-        ("Tan",          "D010", "C", "100k-300k",  True,  time(6, 30), 10.0, True ),
-        ("Chen",         "D011", "C", "100k-300k",  False, time(7,  0), 12.0, True ),
-        ("Muthu",        "D012", "C", ">300k",      False, time(7, 30), 12.0, True ),
-        ("Hasan",        "D013", "C", "20k-100k",   False, time(8,  0), 12.0, True ),
-        ("Govindasamy",  "D014", "C", "100k-300k",  False, time(6,  0), 12.0, True ),
-        ("Kwok",         "D015", "C", "20k-100k",   False, time(8, 30), 10.0, True ),
-        ("Nordin",       "D016", "C", "100k-300k",  False, time(7,  0), 12.0, True ),
-        ("Selvam",       "D017", "C", "20k-100k",   True,  time(8,  0), 10.0, False),  # on leave
-        ("Yap",          "D018", "C", "100k-300k",  False, time(6, 30), 12.0, True ),
-        # ── Cat B — 8 drivers (up to Light Truck) ────────────────────────────
-        ("Krishnan",     "D019", "B", "20k-100k",   False, time(8,  0), 10.0, True ),
-        ("Wong",         "D020", "B", "20k-100k",   False, time(9,  0), 10.0, True ),
-        ("Yeo",          "D021", "B", "20k-100k",   True,  time(6,  0), 10.0, True ),
-        ("Siva",         "D022", "B", "100k-300k",  False, time(7,  0), 10.0, True ),
-        ("Azman",        "D023", "B", "20k-100k",   False, time(8, 30), 10.0, True ),
-        ("Teo",          "D024", "B", "20k-100k",   False, time(7, 30), 10.0, True ),
-        ("Rajendran",    "D025", "B", "100k-300k",  False, time(6,  0), 12.0, True ),
-        ("Huang",        "D026", "B", "20k-100k",   False, time(8,  0), 10.0, True ),
-        # ── Cat A — 4 drivers (Car only) ─────────────────────────────────────
-        ("Ali",          "D027", "A", "<20k",       False, time(7, 30),  8.0, True ),
-        ("Ismail",       "D028", "A", "<20k",       False, time(8, 30),  8.0, True ),
-        ("Ong",          "D029", "A", "<20k",       True,  time(9,  0),  8.0, True ),
-        ("Phua",         "D030", "A", "<20k",       False, time(8,  0),  8.0, True ),
+        # ── Cat A — 8 drivers (all vehicle types incl. 10T) ──────────────────
+        ("Rahman",       "D001", "A", ">300k",      False, time(6,  0), 12.0, True ),
+        ("Ng",           "D002", "A", ">300k",      False, time(5, 30), 12.0, True ),
+        ("Chua",         "D003", "A", "100k-300k",  False, time(5,  0), 12.0, True ),
+        ("Iskandar",     "D004", "A", ">300k",      False, time(6, 30), 12.0, True ),
+        ("Subramaniam",  "D005", "A", "100k-300k",  True,  time(7,  0), 10.0, True ),
+        ("Faizal",       "D006", "A", ">300k",      False, time(6,  0), 12.0, True ),
+        ("Zheng",        "D007", "A", "100k-300k",  False, time(5, 30), 12.0, True ),
+        ("Balachandran", "D008", "A", ">300k",      False, time(7, 30), 12.0, True ),
+        # ── Cat B — 10 drivers (up to 5T) ────────────────────────────────────
+        ("Lim",          "D009", "B", "100k-300k",  False, time(7,  0), 12.0, True ),
+        ("Tan",          "D010", "B", "100k-300k",  True,  time(6, 30), 10.0, True ),
+        ("Chen",         "D011", "B", "100k-300k",  False, time(7,  0), 12.0, True ),
+        ("Muthu",        "D012", "B", ">300k",      False, time(7, 30), 12.0, True ),
+        ("Hasan",        "D013", "B", "20k-100k",   False, time(8,  0), 12.0, True ),
+        ("Govindasamy",  "D014", "B", "100k-300k",  False, time(6,  0), 12.0, True ),
+        ("Kwok",         "D015", "B", "20k-100k",   False, time(8, 30), 10.0, True ),
+        ("Nordin",       "D016", "B", "100k-300k",  False, time(7,  0), 12.0, True ),
+        ("Selvam",       "D017", "B", "20k-100k",   True,  time(8,  0), 10.0, False),  # on leave
+        ("Yap",          "D018", "B", "100k-300k",  False, time(6, 30), 12.0, True ),
+        # ── Cat C — 8 drivers (up to Light Truck) ────────────────────────────
+        ("Krishnan",     "D019", "C", "20k-100k",   False, time(8,  0), 10.0, True ),
+        ("Wong",         "D020", "C", "20k-100k",   False, time(9,  0), 10.0, True ),
+        ("Yeo",          "D021", "C", "20k-100k",   True,  time(6,  0), 10.0, True ),
+        ("Siva",         "D022", "C", "100k-300k",  False, time(7,  0), 10.0, True ),
+        ("Azman",        "D023", "C", "20k-100k",   False, time(8, 30), 10.0, True ),
+        ("Teo",          "D024", "C", "20k-100k",   False, time(7, 30), 10.0, True ),
+        ("Rajendran",    "D025", "C", "100k-300k",  False, time(6,  0), 12.0, True ),
+        ("Huang",        "D026", "C", "20k-100k",   False, time(8,  0), 10.0, True ),
+        # ── Cat D — 4 drivers (Car only) ─────────────────────────────────────
+        ("Ali",          "D027", "D", "<20k",       False, time(7, 30),  8.0, True ),
+        ("Ismail",       "D028", "D", "<20k",       False, time(8, 30),  8.0, True ),
+        ("Ong",          "D029", "D", "<20k",       True,  time(9,  0),  8.0, True ),
+        ("Phua",         "D030", "D", "<20k",       False, time(8,  0),  8.0, True ),
     ]
 
     def __init__(self):
