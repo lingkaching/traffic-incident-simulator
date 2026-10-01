@@ -35,10 +35,10 @@ from typing import Optional
 VEHICLE_TYPES = ["Car", "Light Truck", "5T", "10T"]
 
 VEHICLE_ELIGIBILITY: dict[str, list[str]] = {
-    "A": ["Car"],
-    "B": ["Car", "Light Truck"],
-    "C": ["Car", "Light Truck", "5T"],
-    "D": ["Car", "Light Truck", "5T", "10T"],
+    "D": ["Car"],
+    "C": ["Car", "Light Truck"],
+    "B": ["Car", "Light Truck", "5T"],
+    "A": ["Car", "Light Truck", "5T", "10T"],
 }
 
 MILEAGE_BANDS      = ["<20k", "20k-100k", "100k-300k", ">300k"]
